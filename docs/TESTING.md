@@ -6,16 +6,50 @@ Derived from `CLAUDE_CODE_BUILD_SPEC.md` §19, §23. **No tests have been writte
 
 ## The gate
 
-> **Do not chase a coverage percentage — the fifteen E2E scenarios plus the RLS integration suite
-> are the real gate** (§19.5).
+```bash
+npm run verify     # typecheck -> lint -> unit -> integration -> build -> bundle check
+npm run test:e2e   # Playwright, separately (it starts a dev server)
+```
 
-> **Never verify a permission as OWNER — OWNER passes everything, which is exactly why it proves
-> nothing** (§23).
+**Run the full suite each phase. Fix every failure. Never skip, `.skip`, or delete a failing test
+to make a phase pass** (§22.1 step 8).
 
-> **A hidden button is never a control. Every security test must attack the API, not the UI**
-> (§19.4).
+Do not chase a coverage percentage. The gate is **the fifteen E2E scenarios plus the RLS suite**.
 
-> **Run the full suite each phase. Fix every failure. Never skip a failing test** (§22.1 step 8).
+### Current state — Master Phase 1
+
+| Suite | Count | Status |
+|---|---|---|
+| Unit (Vitest) | 232 | passing |
+| Integration + RLS (Vitest + PostgreSQL) | 151 | passing |
+| E2E smoke (Playwright) | 8 | passing |
+| `tsc --noEmit` | — | clean |
+| ESLint | — | clean |
+| `next build` | — | clean |
+| Service-role key absent from the bundle | — | verified |
+
+### Where the tests run (ADR-018)
+
+§19.2 assumes `supabase start`. Where the Supabase container images are unreachable — as in the
+environment this was built in — the database suites run against a **real PostgreSQL 16 server**
+with the platform bootstrap in `supabase/platform/`.
+
+A test impersonates a user **exactly as PostgREST does**:
+
+```ts
+await db.query('select set_config($1, $2, true)', [
+  'request.jwt.claims',
+  JSON.stringify({ sub: userId, role: 'authenticated' }),
+])
+await db.query('set local role authenticated')
+```
+
+Nothing is mocked. `auth.uid()` resolves the way it does in production, and a policy that would
+refuse a real request refuses the test, with the same error code.
+
+**What cannot be tested here, and is not claimed to be:** Supabase Auth itself — password hashing,
+JWT issue, the built-in login rate limiting of C-5 — Storage buckets and their policies (§15.6),
+and PostgREST's own request handling. Those need a real Supabase project in `ap-south-1`.
 
 ---
 
@@ -30,36 +64,68 @@ Derived from `CLAUDE_CODE_BUILD_SPEC.md` §19, §23. **No tests have been writte
 | Dashboard metrics | Every §13.1 definition against fixture arrays, including **Win Rate returning null (displayed `—`) when the denominator is 0** |
 | Dates | Overdue/due-today/days-in-stage **across timezone boundaries** — the IST↔UTC 00:00–05:30 window (`/docs/SPEC_AUDIT.md` B-10) |
 | Error mapping | Every constraint name → friendly message; unmapped errors become `INTERNAL` and never leak Postgres text |
+| Permissions | The §3.1 capability matrix cell by cell, outlet scope for zero/one/many outlets, and the ADR-017 ADMIN case — mirroring the RLS policies so the UI never offers an action the database refuses |
+
+**Built in Master Phase 1:** phone, money, dates, transitions, permissions, error mapping.
+**Arriving with their features:** duplicate confidence (§8.9) and the dashboard metrics (§13.1) —
+there is nothing to test until the code they describe exists, and a test written against an
+imagined implementation tests the imagination.
 
 ---
 
-## 2. Integration (Vitest + local Supabase) — database and RLS (§19.2)
+## 2. Integration (Vitest + a real database) — database and RLS (§19.2)
 
-Run against `supabase start` with seeded users of each role.
+Fixture users of every role, in `supabase/seed/dev-fixtures.sql`: an owner with no outlets, an
+admin, a manager on one outlet, a manager on two, a manager on none, three salespeople across two
+outlets, and a deactivated user. Three outlets, so *"assigned to A and C"* is distinguishable from
+*"sees everything"*.
 
 > **These are the most important tests in the project.**
+
+Files: `harness.ts` · `rls-outlet-scope.test.ts` · `schema-constraints.test.ts` ·
+`audit-trail.test.ts` · `no-hard-delete.test.ts` · `activities-window.test.ts` ·
+`timezone-and-flags.test.ts`.
 
 ### Constraints and triggers
 - Check constraints reject: won without value, won without `closed_at`, lost without reason, lost
   without `closed_at`, quoted without quotation ref, next-action half-set, nurture without date,
   contact with neither phone nor email, stakeholder with neither target.
-- The trigger writes an `opportunity_events` row on **every** stage and owner change — and both
-  rows when stage and owner change in one statement.
+- **`selection → negotiation` succeeds with no quotation information** — the ADR-006 regression
+  test, because the constraint binds on `quoted` alone.
+- An account with neither phone nor email is rejected (`account_reachable`, ADR-013).
+- The trigger writes an `opportunity_events` row on **every** stage and owner change, emits
+  `REOPENED` for `won → qualified` and `ARCHIVED`/`RESTORED` on archive, and reads the reason from
+  the `app.event_reason` GUC (ADR-001).
+- A service-role write with no `auth.uid()` is attributed to the system actor (ADR-003).
+- Reopening a won opportunity clears `final_order_value` and `closed_at`, **preserves the WON
+  event**, and leaves `accounts.status` alone (ADR-007).
 - The partial unique index rejects a second primary stakeholder.
-- `stage_changed_at` advances on stage change and only then (`/docs/SPEC_AUDIT.md` H-01).
-- `v_opportunity_flags` has `security_invoker = true` — asserted against `pg_class.reloptions`,
-  because a default view silently leaks every salesperson's pipeline (§25).
+- `phone_normalized` matches `lib/phone.ts` case for case, and is deliberately **not** unique.
+- **`v_opportunity_flags` has `security_invoker = true`** — asserted against `pg_class.reloptions`
+  *and* behaviourally, because a default view silently leaks every salesperson's pipeline (§25).
+- Every date expression in the view converts to Asia/Kolkata; the view definition is asserted to
+  contain **no bare `current_date`**, and `businessDate()` in TypeScript is checked against the SQL
+  expression at the 18:30 UTC boundary and across a year end.
 
 ### RLS — every assertion made as the restricted role
 - Salesperson A cannot SELECT, UPDATE or INSERT-on-behalf-of salesperson B's records.
 - Salesperson **can** read an account they do not own when they own an opportunity on it — and
   that account's contacts and projects by the same route.
-- Salesperson cannot change `owner_id` — by table UPDATE, by PostgREST, or through the RPC.
-- ADMIN cannot reassign; MANAGER and OWNER can (H-05, via `can_reassign()`).
+- Salesperson cannot change `owner_id`, cannot null it, cannot move a record to another outlet and
+  cannot archive one.
+- **Cross-outlet (ADR-016):** Manager A reaches outlet A and **not** B or C; a manager on A and C
+  reaches both and still not B; a manager with **no** outlets reaches nothing; revoking an
+  assignment removes the scope immediately. A record's outlet decides scope, **not its owner's
+  posting**.
+- **ADMIN reads no business data at all** (ADR-017) while still administering users, outlets and
+  settings; a manager cannot manage users or outlets.
+- A deactivated user holding a valid token reads nothing; an anonymous caller reaches nothing.
+- ADMIN cannot reassign; MANAGER and OWNER can (H-05, subsumed by ADR-017).
 - **ADMIN cannot export** through the Server Action, not merely through a hidden button (C-2).
 - **No role can DELETE from any business table**, including `users` (H-06) — asserted table by
-  table. **`project_stakeholders` is the single approved exception** (ADR-004) and must *succeed*;
-  all ten other tables must *fail*, for every role.
+  table and role by role, plus a check that `authenticated` holds the DELETE privilege on nothing
+  else. **`project_stakeholders` is the single approved exception** (ADR-004) and must *succeed*;
+  all twelve other tables must *fail*, for every role.
 - A salesperson cannot escalate their own role via a profile update.
 - Archived records are excluded from active queries and included in archive queries for
   authorised roles.
@@ -74,6 +140,22 @@ Run against `supabase start` with seeded users of each role.
 ---
 
 ## 3. End-to-end (Playwright) — the fifteen required scenarios (§19.3)
+
+**Master Phase 1 ships a smoke suite, not the fifteen scenarios.** Signing a user in needs Supabase
+Auth, which cannot run in this environment (ADR-018), and a test that faked a session would prove
+nothing about the thing it claims to test.
+
+What the smoke suite proves today:
+
+- the login screen renders, with an email field, a password field and a submit button;
+- **there is no sign-up link and no registration path** (§3.2);
+- an unauthenticated visitor to `/`, `/today`, `/dashboard`, `/settings` or `/accounts` lands on
+  the login screen;
+- no part of the authenticated shell renders for a signed-out visitor.
+
+The fifteen scenarios arrive with the features they cover, against a real Supabase project.
+
+### The fifteen required scenarios
 
 1. Salesperson creates a customer
 2. Salesperson creates a project

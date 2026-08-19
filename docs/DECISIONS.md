@@ -7,7 +7,7 @@ Two registers:
   `system_settings`, never in code: a resolved decision fixes the *value*, it does not licence a
   constant. Changing a value must still never require a deploy.
 - **B. Architecture decision record** — stack or architecture changes. §17.1 requires the reason
-  to be recorded **before** implementing the change. **Fifteen ADRs** are accepted below.
+  to be recorded **before** implementing the change. **Eighteen ADRs** are accepted below.
 - **C. Product decisions closing the remaining audit findings** — the five product/permission
   questions the audit raised that are neither `TODO-BD` items nor architecture changes.
 
@@ -223,6 +223,12 @@ now approved.
   filtering, and no branch behaviour in RLS in V1** (§17.6).
 - **How to change later.** Add filtering and a branch picker. **No migration needed.**
 - **Decided by:** Project Owner · **Date:** 2026-08-19
+- **SUPERSEDED 2026-08-19 by ADR-016.** The business restated the operating reality — two outlets
+  now, five to ten expected across Tamil Nadu, with managers holding zero, one or several of them.
+  `branch text` cannot carry an identity, an assignment or a deactivation, so **the columns are
+  retired and replaced** by the `outlets` table, the `user_outlets` link table and
+  `outlet_id` foreign keys. Outlet scope **is** enforced in RLS. A migration **is** needed. The
+  original decision is preserved above as the record of what the system held before.
 
 ---
 
@@ -738,6 +744,185 @@ what the Phase 1 file list assumed.
 adopts a superseded major for a system with a multi-year life, and the file list was written
 before the version question was examined. The file list is descriptive of expected artifacts, not
 a specification clause; §17.1 names Tailwind, not a Tailwind major.
+
+---
+
+### ADR-016 — Outlets are a table and outlet scope is a link table; `branch` is retired
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Supersedes:** TODO-BD-12's "columns retained; no UI, filtering or RLS in V1"
+**Affects:** Phases 3, 4, and every later phase that reads a business table
+
+**Context.** TODO-BD-12 answered "is a second branch in the planning horizon?" with *keep the
+`branch text` columns, build nothing*. The business has since stated the operating reality:
+**two outlets today, five to ten across Tamil Nadu expected**, with 16 salespeople and 2 sales
+managers. It also stated the permission rule those outlets exist to serve — *a manager sees the
+records of the outlet(s) they are assigned to* — and the shapes it must survive: a manager with
+zero, one or several outlets; several managers on one outlet; a user moving between outlets
+without a role change; an outlet closing without its history disappearing.
+
+`branch text not null default 'MAIN'` cannot express any of that. It is free text, so an outlet
+has no identity, cannot be renamed, cannot be deactivated, and cannot be assigned to a person. A
+manager's scope would have to be a string comparison against a value nobody controls. Keeping
+`branch` *and* adding real outlets would leave two competing concepts in the schema, which the
+business explicitly ruled out.
+
+**Decision.**
+
+1. **`outlets` becomes a table.** `code`, `name`, `city`, `is_active`. Outlet names are data, never
+   constants, never enum values, and never part of a role name.
+2. **`user_outlets` is a link table** — `(user_id, outlet_id)` composite primary key. A user has
+   **zero or more** outlets. This is the only expression of outlet scope for a person.
+3. **`branch` is deleted, not kept.** Every column that carried it —
+   `users.branch`, `accounts.branch`, `projects.branch`, `opportunities.branch` — is replaced.
+   On `users` the replacement is the `user_outlets` link; on the three business tables it is
+   `outlet_id uuid not null references public.outlets(id)`.
+4. **Outlet scope is enforced in RLS**, not in application filtering, through
+   `public.manages_outlet(outlet_id)`.
+5. **Roles never encode an outlet.** `user_role` keeps its four values. There is no
+   `OUTLET_MANAGER_A`, and adding one would be a defect.
+
+**Consequences.**
+- **The model grows from eleven tables to thirteen.** This is the deviation being approved here,
+  and `CLAUDE.md` §4 requires it to be recorded before the migration is written — which is what
+  this entry does. Both new tables are organizational structure, not CRM business records: they
+  carry no money, no pipeline stage and no ownership. §4.2's rejected tables stay rejected.
+- A manager with **zero** outlets sees only their own records. That is the correct reading of
+  "records belonging to their assigned outlet scope(s)" when the scope is empty, and it means a
+  newly created manager is safe by default rather than accidentally company-wide.
+- **OWNER stays company-wide** and is deliberately *not* modelled as membership of every outlet —
+  company-wide authority is a property of the role, and enumerating outlets for the owner would
+  silently narrow their access the day an outlet is added.
+- Deactivating an outlet is `is_active = false`. Historical records keep pointing at it, so
+  reporting over a closed outlet still works. **`outlets` has no DELETE policy**, like every other
+  table except `project_stakeholders` (ADR-004).
+- Moving a user between outlets is an edit to `user_outlets` and touches neither their role nor
+  their records.
+- `outlet_id` is `not null` on the three business tables. A record that belongs to no outlet would
+  be invisible to every manager, which is precisely the accountability gap the CRM exists to close.
+- `handle_new_auth_user()` no longer defaults `branch` to `'MAIN'` (ADR-009); a provisioned user
+  starts with **no** outlet, and OWNER/ADMIN assigns one.
+- §5.10's settings keys are unaffected. **Outlets are rows, not settings** — they are referenced by
+  foreign key from business records, which a `system_settings` JSON array cannot do.
+
+**Alternatives considered.**
+- *Keep `branch` and add a `manager_branches text[]` column on `users`.* Rejected: outlets still
+  have no identity, renaming an outlet silently orphans a manager's scope, and an array column
+  cannot be foreign-keyed or deactivated.
+- *A single `outlet_id` on `users`.* Rejected outright by the stated requirement — a manager may
+  hold several outlets, and one manager per outlet was explicitly named as an assumption not to
+  make.
+- *Outlets in `system_settings.outlets` as JSON.* Rejected: business records must reference an
+  outlet by foreign key, and referential integrity is not available against a JSON array.
+- *Derive a record's outlet from its owner's membership.* Rejected: reassigning an opportunity to a
+  salesperson at another outlet would silently move historical records between outlets, and a
+  record owned by an unassigned (`owner_id is null`) opportunity would belong nowhere.
+
+---
+
+### ADR-017 — ADMIN does not receive automatic business-data visibility
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Supersedes:** the "See all records" ✔ for ADMIN in §3.1, and ADMIN's membership of
+`is_manager_or_above()` in §15.1
+**Affects:** Phases 3, 4, and every RLS policy on a business table
+
+**Context.** §3.1 grants ADMIN "See all records", and §15.1 defines
+`is_manager_or_above()` as `role in ('MANAGER','OWNER','ADMIN')`, so ADMIN passed the read policy
+on every business table. §3.2 simultaneously describes ADMIN as "a system/data role, not a sales
+role: no dashboards, no reassignment, no export". The business has now stated the position
+plainly: **ADMIN administers users, configuration, imports and the system; it does not carry an
+automatic right to read the pipeline.**
+
+Those two readings cannot both hold in a policy. Between them, the narrower one is the one that
+matches how the role is actually used and the one whose failure mode is a support request rather
+than a customer-data leak.
+
+**Decision.** `is_manager_or_above()` resolves to **MANAGER or OWNER**. ADMIN is removed from it.
+ADMIN keeps everything its administrative function requires, through `is_owner_or_admin()`:
+`users`, `user_outlets`, `outlets`, `system_settings`, `import_batches` and `import_rows`.
+
+**Consequences.**
+- ADMIN reading `accounts`, `contacts`, `projects`, `opportunities`, `activities` or
+  `opportunity_events` gets **their own records only** — the same as any user with no elevated
+  business role. This carries a dedicated negative test.
+- The helper keeps its specified name so §15 and `CLAUDE.md` §6 still describe where role lookups
+  happen; only its membership changes. Reviewers reading "or above" should read it as *above
+  SALESPERSON in the sales hierarchy*, which ADMIN is not on.
+- An administrator who genuinely needs pipeline visibility is given the OWNER role or a MANAGER
+  role with outlet scope — an explicit, auditable grant rather than a side effect of holding the
+  keys to user provisioning.
+- Import remains ADMIN's (§3.1), and the import executor runs as service-role, so ADMIN's loss of
+  direct read access does not affect it.
+- §3.1's ADMIN row for "See all records" is contradicted. Recorded in `/docs/SPEC_AUDIT.md`.
+
+**Alternatives considered.** Leaving ADMIN inside `is_manager_or_above()` — rejected: it grants the
+role that provisions users a silent, untested read over every customer record in the business,
+which is the opposite of what §3.2 says the role is for.
+
+---
+
+### ADR-018 — The database runtime is plain PostgreSQL with a platform bootstrap when Docker is unreachable
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Affects:** Phases 3 onward, CI, `/docs/SETUP.md`, `/docs/TESTING.md`
+
+**Context.** §19.2 requires the integration and RLS suites to run against a real database, and §7
+of this build requires generated types to come from a verified database and never to be
+hand-written. `supabase start` pulls its images from `public.ecr.aws`, whose blob CDN
+(`d2glxqk2uabbnd.cloudfront.net`) is **denied by the environment's egress policy**. `supabase gen
+types --local` shells out to the `postgres-meta` container and fails the same way. Working around
+the egress policy is not an option, and neither is declaring the phase verified without ever
+executing the SQL.
+
+**Decision.** Migrations, tests and type generation run against a **real PostgreSQL 16 server**,
+with the Supabase platform objects the application depends on created by a bootstrap file that is
+**not a migration**:
+
+- `supabase/platform/000_supabase_platform.sql` creates the roles (`anon`, `authenticated`,
+  `service_role`, `authenticator`, `supabase_admin`), the `auth`, `extensions` and `graphql_public`
+  schemas, `auth.users`, and `auth.uid()` / `auth.jwt()` / `auth.role()` / `auth.email()` **with
+  the platform's own definitions**, which read `request.jwt.claims`.
+- Migrations are applied by the **Supabase CLI** (`supabase migration up --db-url`), which needs no
+  container, so migration ordering and the `supabase_migrations` ledger are exercised for real.
+- Types are generated by **`@supabase/postgres-meta`** — the same generator the
+  `supabase gen types` container runs — invoked as a library against the same database.
+
+**Consequences.**
+- Tests impersonate a user exactly as PostgREST does: `set role authenticated` plus
+  `set request.jwt.claims`. An RLS test is therefore a test of the policy, not of a mock, and it
+  fails for the same reasons a production request would.
+- **Two dev dependencies are added**, both `devDependencies` only, both shipping nothing to the
+  browser, and both consequences of the same decision. §17.1 requires the reason to be recorded
+  before installation — this entry is that record.
+  - **`@supabase/postgres-meta`**, pinned to the version the CLI's container image uses, for type
+    generation.
+  - **`pg`** (plus `@types/pg`), for the integration and RLS suites. §19.2 assumed the suite would
+    reach the database through PostgREST on the local Supabase stack; without that stack the tests
+    connect to PostgreSQL directly and impersonate a user the way PostgREST does — `set role
+    authenticated` plus `set_config('request.jwt.claims', …)`. `pg` is already present as a
+    transitive dependency of `@supabase/postgres-meta`; declaring it is honesty about what the
+    test harness imports, not an extra download.
+
+  No runtime dependency, no application code and no architecture changes.
+- `npm run db:types` keeps its Supabase-CLI definition for machines that can reach Docker;
+  `npm run db:types:nodocker` is the equivalent that does not need it. **Both write the same file
+  from the same generator.**
+- The bootstrap reproduces **only** what Supabase guarantees and the application actually uses. It
+  is not a Supabase reimplementation: there is no GoTrue, no PostgREST, no Storage, and nothing in
+  `supabase/migrations` may depend on anything it defines beyond those objects.
+- What this runtime **cannot** verify is recorded honestly rather than assumed: Supabase Auth's own
+  behaviour (password hashing, JWT issue, its built-in login rate limiting, C-5), Storage buckets
+  and their policies (§15.6), and PostgREST's request handling. Those need a real Supabase project
+  and stay open until one is provisioned in `ap-south-1` (TODO-BD-08).
+- `supabase/config.toml` still declares `major_version = 17`; the local runtime is PostgreSQL 16.
+  Nothing in the schema uses a 17-only feature, and the remote project remains the authority.
+
+**Alternatives considered.** Waiting for a remote Supabase project (blocks every downstream phase
+on infrastructure provisioning that is not this phase's work, and would put an unverified schema
+into a shared environment); hand-writing `database.types.ts` (forbidden, and it would stop
+reflecting the database the moment either drifted); declaring Phase 3 verified without executing
+the SQL (a fabricated result — `CLAUDE.md` §15).
 
 ---
 

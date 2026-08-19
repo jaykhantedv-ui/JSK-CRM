@@ -25,5 +25,15 @@ export default defineConfig({
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
+    env: {
+      // The smoke suite never signs in (ADR-018 — Supabase Auth cannot run here),
+      // so these only need to be present and well-formed. The Supabase client is
+      // constructed, its call to an unreachable auth server fails, no user
+      // resolves, and the middleware redirects — which is exactly the path under
+      // test. A real project's values come from .env.local.
+      NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? 'http://127.0.0.1:54321',
+      NEXT_PUBLIC_SUPABASE_ANON_KEY:
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? 'e2e-smoke-anon-key',
+    },
   },
 })

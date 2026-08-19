@@ -278,10 +278,17 @@ network policy; configure alternate registries to evade the restriction; claim a
 steps succeeded; write Phase 3 migrations to compensate for the missing database; or provision
 staging or production through an unverified path.
 
-### Phase 3 entry condition
+### Phase 3 entry condition — MET (ADR-018)
 
 **Phase 3 must not start until the local Supabase stack runs successfully in a networked
 environment, or an equivalent approved verification environment is available.**
+
+**An equivalent environment was established on 2026-08-19 and the condition is met.** The Supabase
+container registry is denied by the environment's egress policy, so `supabase start` cannot run;
+the approved alternative is a **real PostgreSQL 16 server** with the platform bootstrap in
+`supabase/platform/`, migrations applied by the Supabase CLI over `--db-url`, and types generated
+by `@supabase/postgres-meta`. See **ADR-018**. The migrations have since been applied cleanly from
+empty **twice in a row** and are covered by 151 integration tests.
 
 Phase 3 writes seventeen migrations whose acceptance criterion is *"`supabase db reset` applies
 the full sequence cleanly to an empty database, twice in a row"*. Writing migrations that cannot
@@ -290,10 +297,8 @@ shared environment (§21.2), so a defect introduced blind becomes a permanent se
 rather than an edit. §21's definition of done is explicit: *migrations applied* and *tests
 passing*, not *migrations written*.
 
-`src/types/database.types.ts` is **deliberately absent**. Generating it requires a live
-database, and fabricating one by hand would put invented tables into a file whose whole
-purpose is to mirror the real schema (`CLAUDE.md` §15). It lands with the first migration
-in Phase 3.
+`src/types/database.types.ts` **now exists**, generated from the verified database. It is never
+hand-written and never hand-edited — regenerate it instead.
 
 **Resolved during review — `server-only` declined**
 
@@ -305,8 +310,50 @@ approved as sufficient: (1) the runtime browser guard on module evaluation and o
 
 ---
 
+# ★ Master Phase 1 — Platform foundation (2026-08-19)
+
+A consolidated pass covering the original Phases 3–6: the database, authentication, the outlet
+model, RLS, the shared service layer and generated types. **No CRM feature screens.**
+
+| Deliverable | State |
+|---|---|
+| Real database runtime | ✅ PostgreSQL 16 + platform bootstrap (ADR-018) — Docker registry blocked |
+| Migrations 001–017 | ✅ applied cleanly from empty, twice |
+| `src/types/database.types.ts` | ✅ generated from the verified database |
+| Outlet model | ✅ `outlets` + `user_outlets` + `outlet_id`; `branch` retired (ADR-016) |
+| Authentication | ✅ email/password, SSR sessions, no self-registration, role-aware routing |
+| RLS and permissions | ✅ 39 policies, one DELETE policy, outlet scope enforced at the boundary |
+| Core services | ✅ errors · money · dates · phone · validation · permissions · transitions · settings · auth · user · outlet |
+| Tests | ✅ 232 unit · 151 integration/RLS · 8 E2E smoke |
+| Gate | ✅ typecheck · lint · build · bundle check all clean |
+
+**Open, needing a decision:** P1-05 — events written in one transaction share a `created_at` and
+have no defined order. See `/docs/SPEC_AUDIT.md`.
+
+**Open, needing infrastructure:** Supabase Auth behaviour, Storage policies and PostgREST request
+handling cannot be verified until a project exists in `ap-south-1`.
+
+**Not started:** every CRM feature screen, dashboards, reports, import, file uploads, cron and
+notification automation. Those are Master Phases 2–5.
+
+---
+
 # Phase 3 — Database migrations and database helpers
 
+> ## ✅ BUILT — Master Phase 1, 2026-08-19
+>
+> Seventeen migrations, applied cleanly from empty twice in a row against a real PostgreSQL 16
+> server (ADR-018). Two defects were found by executing them and fixed before anything shipped:
+> the audit trigger's `CASE` resolved to `text` and would have rejected **every** stage change,
+> and `guard_record_scope()` fired for service-role callers that already bypass RLS. Both are
+> recorded in `/docs/DATABASE.md`.
+>
+> **Deviations, each with an ADR recorded before the migration was written:** `outlets` and
+> `user_outlets` replace `branch` (ADR-016, thirteen tables); ADMIN loses automatic business-data
+> visibility (ADR-017).
+>
+> The original blocking note is preserved below as the record of why it was blocked.
+>
 > ## ⛔ BLOCKED — do not start
 >
 > Phase 3 requires a working local Supabase stack: its acceptance criterion is that
@@ -443,6 +490,14 @@ a new migration, not an edit.
 
 # Phase 4 — Authentication and users
 
+> **✅ BUILT — Master Phase 1, 2026-08-19.** Email/password sign-in, SSR sessions refreshed in
+> middleware, role-aware landing (`/today`, `/dashboard`, `/settings`), no self-registration
+> anywhere, and OWNER/ADMIN provisioning through `user.service.ts` with the authorization check
+> **before** the admin client (ADR-009). A deactivated user is refused at the database boundary,
+> not only at login: every policy resolves ownership through `current_user_id()`, which filters on
+> `is_active`, so a token issued before deactivation buys nothing.
+> **Not verified here:** Supabase Auth's own behaviour, including C-5 login throttling (ADR-018).
+
 **Spec phase:** 1 Foundation · **Spec sections:** §3.2, §5.2, §12.2, §15.3, §15.8, §17.2
 
 **Objective.** Email/password login via Supabase Auth, httpOnly cookie sessions via
@@ -493,6 +548,11 @@ configured limits, which are recorded in `/docs/DEPLOYMENT.md` once the projects
 ---
 
 # Phase 5 — RLS and permissions
+
+> **✅ BUILT — Master Phase 1, 2026-08-19.** 39 policies across 13 tables, **one** DELETE policy
+> (`project_stakeholders`, ADR-004), RLS enabled in each table's own migration (H-04), and outlet
+> scope enforced at the database boundary (ADR-016). 151 integration tests, every one asserted
+> **as the restricted role**.
 
 **Spec phase:** 1–5 (written per table), audited in 8 · **Spec sections:** §3.1, §3.2, §15 (all), §19.2
 
@@ -554,6 +614,12 @@ remain the main threat to §12.8's 400 ms budget; measure here, not in Phase 20.
 ---
 
 # Phase 6 — Core services and business logic
+
+> **✅ FOUNDATION BUILT — Master Phase 1, 2026-08-19.** The error contract, Zod conventions, money,
+> phone, dates, permissions, the full transition matrix, and the settings, auth, user and outlet
+> services. The account, contact, project, opportunity, activity, dashboard and import services
+> arrive with their features — they were deliberately **not** written ahead of the screens that
+> use them.
 
 **Spec phase:** 2–7 (foundation laid here) · **Spec sections:** §16 (all), §17.2, §17.3, §18, §8.11
 

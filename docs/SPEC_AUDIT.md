@@ -847,3 +847,74 @@ Nothing in this audit blocks Phase 2 or Phase 3.
 | M-11 | Product decision | Explicit creation/edit routes; account tabs via query state | C-4 | 7, 8–11 |
 | M-12 | Architecture correction | Supabase Auth built-in rate limiting; no Redis; tested | C-5 | 4, 19 |
 | §14.6 state | Architecture deviation | Maintenance failure counters in `system_settings` | ADR-014 | 3, 18 |
+| §3.1 ADMIN row | Architecture deviation | ADMIN removed from `is_manager_or_above()`; no automatic business-data read | ADR-017 | 3, 4 |
+| TODO-BD-12 `branch` | Architecture deviation | `branch` retired; `outlets` + `user_outlets` + `outlet_id`; outlet scope enforced in RLS | ADR-016 | 3, 4 |
+| M-20 (revisited) | Architecture deviation | Docker egress blocked; plain PostgreSQL + platform bootstrap + `postgres-meta` generator | ADR-018 | 3, 19 |
+
+---
+
+## Findings raised during Master Phase 1
+
+Three items were found while implementing the platform foundation. Each is recorded here rather
+than resolved in code, per `CLAUDE.md` §2.
+
+### P1-01 — §3.1 grants ADMIN "See all records" while §3.2 calls it "not a sales role"
+
+**Severity:** HIGH · **Type:** Architecture deviation · **Resolved by:** **ADR-017**
+
+§3.1's capability matrix marks "See all records" ✔ for ADMIN and §15.1 puts ADMIN inside
+`is_manager_or_above()`, so ADMIN passed the SELECT policy on every business table. §3.2 says the
+opposite in prose: "ADMIN is a system/data role, not a sales role". A policy cannot hold both.
+Resolved in favour of the narrower reading: ADMIN administers users, settings and imports and has
+**no automatic business-data visibility**. Carries a negative test.
+
+### P1-02 — `branch text` cannot express the stated outlet requirement
+
+**Severity:** HIGH · **Type:** Architecture deviation · **Resolved by:** **ADR-016**
+
+§5.2–§5.7 carry `branch text not null default 'MAIN'` and TODO-BD-12 froze it as inert. The stated
+requirement — manager scope over zero, one or many outlets, several managers per outlet, users
+moving between outlets, an outlet deactivated without losing history — needs identity and
+assignment, which free text has neither of. `branch` is retired and replaced. **The table count
+rises from eleven to thirteen**; both additions are organizational structure, not CRM records.
+
+### P1-03 — §19.2's "local Supabase" is unreachable under the environment's egress policy
+
+**Severity:** BLOCKER (for verification) · **Type:** Architecture deviation · **Resolved by:** **ADR-018**
+
+`supabase start` and `supabase gen types --local` pull images from `public.ecr.aws`, whose blob CDN
+is denied by the egress policy. Rather than skip execution or fabricate a result, migrations, RLS
+tests and type generation run against a **real PostgreSQL 16 server** with a platform bootstrap
+providing the Supabase objects the application depends on. **What this cannot verify is listed in
+ADR-018 and remains open**: Supabase Auth's own behaviour, Storage policies (§15.6), and
+PostgREST request handling.
+
+### P1-04 — §15.3's `users_admin_all` policy grants DELETE
+
+**Severity:** HIGH · **Type:** Architecture correction · **No ADR needed**
+
+§15.3 writes the OWNER/ADMIN policy on `public.users` as
+`create policy users_admin_all … for all`. **`for all` includes DELETE**, which would put a second
+delete grant in the schema and contradict §15.2's "no `DELETE` policy on any business table" and
+ADR-004's "exactly one". The spec's *intent* is unambiguous — §15.2 and ADR-004 both state it — so
+the text is defective rather than the design.
+
+**Resolution.** Split into explicit `users_admin_insert` and `users_admin_update`; SELECT is
+already covered by `users_select`. No DELETE policy is created. `tests/integration/no-hard-delete.test.ts`
+asserts the schema has exactly one DELETE policy and that it is on `project_stakeholders`.
+
+### P1-05 — audit events written in one transaction have no defined order
+
+**Severity:** MEDIUM · **Type:** Open — needs a Project Owner decision
+
+`opportunity_events.created_at` defaults to `now()`, which is **transaction start time**, and
+§16.3 requires `changeOpportunityStage`, `logActivity` and `bulkReassign` to run as single
+transactions. Several events therefore share an identical timestamp routinely — a stage change and
+a reassignment in one RPC — and `(opportunity_id, created_at desc)`, the index §5.9 specifies for
+reading the trail, cannot order them. The audit timeline is non-deterministic to read.
+
+**Not resolved in code.** `clock_timestamp()` would fix it in one word, but it deviates from
+§5.9's DDL and this is a judgement about how the audit trail should behave, not a defect with an
+obvious right answer. The schema is left **exactly as specified** and the question is raised for
+decision. The integration suite asserts on event content rather than order, so nothing depends on
+the ambiguity meanwhile.

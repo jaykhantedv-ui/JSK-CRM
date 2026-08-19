@@ -1,5 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
+import type { Database } from '@/types/database.types'
+
 import { supabaseServiceRoleKey, supabaseUrl } from './env'
 
 /**
@@ -51,10 +53,10 @@ assertServerOnly()
  * read the key at import time, which makes the key harder to keep out of a bundle
  * and the guard easier to bypass by accident.
  */
-export function createAdminClient(): SupabaseClient {
+export function createAdminClient(): SupabaseClient<Database> {
   assertServerOnly()
 
-  return createClient(supabaseUrl(), supabaseServiceRoleKey(), {
+  return createClient<Database>(supabaseUrl(), supabaseServiceRoleKey(), {
     auth: {
       persistSession: false,
       autoRefreshToken: false,

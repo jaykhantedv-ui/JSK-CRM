@@ -107,7 +107,8 @@ features/       feature modules: components, hooks, schemas
   └─ MUST NEVER import from another feature folder (§18) — enforced by lint (M-30)
 services/       ALL business logic. One rule, one place.
   └─ throws AppError; calls lib/supabase/server or an RPC
-lib/            supabase clients · money · phone · dates · errors · permissions · transitions
+lib/            supabase clients · money · phone · dates · errors · permissions · validation
+                opportunity/transitions
 types/          database.types.ts (generated) · domain.ts
 ```
 
@@ -116,7 +117,12 @@ stage transition is legal, whether a value is high-value, or who may reassign.
 
 **`settings.service.ts` is the only reader of `system_settings`.** Resolving the twelve `TODO-BD`
 items fixed the *values*; it did not licence a constant. `30000000` (the approved high-value
-threshold) must never appear as a literal anywhere.
+threshold) must never appear as a literal anywhere. Reads are wrapped in React's `cache`, so one
+request reads the table once however many components ask — no cache infrastructure, per §17.1.
+
+**Built in Master Phase 1:** `settings`, `auth`, `user` (provisioning, ADR-009) and `outlet`
+(ADR-016) services, plus the shared `lib/*` foundation. The account, contact, project,
+opportunity, activity, dashboard and import services arrive with their features.
 
 ---
 
@@ -127,6 +133,11 @@ threshold) must never appear as a literal anywhere.
 | `lib/supabase/client.ts` | anon | Browser components (reads, and the ADR-005 signed-URL upload) | Applies |
 | `lib/supabase/server.ts` | anon + user session | Server Components, Server Actions, services | **Applies** |
 | `lib/supabase/admin.ts` | **service-role** | Cron routes · the import executor · **user provisioning (ADR-009)** | **Bypassed** |
+
+All three are typed against the generated `Database`, so a query naming a column that does not
+exist fails `tsc` rather than at runtime. That is not cosmetic: it is what caught the ambiguous
+`user_outlets` embed — the table references `users` twice, as the member and as `created_by`, so
+the embed needs an explicit foreign-key hint.
 
 - The **anon key** is safe to expose. RLS is what protects the data.
 - The **service-role key must never be imported into any file under `app/` that ships to the
@@ -300,17 +311,39 @@ RLS in V1**) · `order_reference` (accounting handoff — TODO-BD-09) · `is_imp
 CLAUDE_CODE_BUILD_SPEC.md · CLAUDE.md · README.md · .env.example
 /docs        PRODUCT_REQUIREMENTS · DATABASE · ARCHITECTURE · PERMISSIONS · API
              TESTING · DECISIONS · SETUP · DEPLOYMENT · IMPLEMENTATION_PLAN · SPEC_AUDIT
-/supabase    /migrations  /seed  config.toml
+/supabase    /migrations  /seed  /platform (local runtime only, ADR-018)  config.toml
+/scripts     db.sh · gen-types.mjs · check-no-service-key.sh
 /src/app     (auth)/login · (app)/{today,dashboard,accounts,contacts,projects,opportunities,
              team,reports,import,settings,archive,search} · api/cron/*
 /src/components   /ui (shadcn) · /shared · /layout
 /src/features     accounts · contacts · projects · opportunities · activities · dashboard · import
-/src/services     account · contact · project · opportunity · activity · dashboard · import
-                  settings · /integrations
-/src/lib          /supabase{client,server,admin} · money · phone · dates · errors · permissions
+/src/services     settings · auth · user · outlet · /integrations         [built]
+                  account · contact · project · opportunity · activity
+                  dashboard · import                                       [later phases]
+/src/lib          /supabase{client,server,admin,middleware,env} · money · phone · dates
+                  errors · permissions · validation · /opportunity/transitions
 /src/types        database.types.ts (generated) · domain.ts
 /tests            /unit /integration /e2e
 ```
+
+---
+
+## 12a. The local database runtime (ADR-018)
+
+Where the Supabase container images cannot be pulled, migrations, the integration and RLS suites,
+and type generation all run against a **real PostgreSQL 16 server**, with the platform objects the
+application depends on created by `supabase/platform/000_supabase_platform.sql` — **not a
+migration**, and never run against a Supabase project.
+
+- Migrations are applied by the **Supabase CLI** (`supabase migration up --db-url`), so ordering
+  and the `supabase_migrations` ledger are exercised for real.
+- Types come from **`@supabase/postgres-meta`** — the same generator the `supabase gen types`
+  container runs — invoked as a library.
+- Tests impersonate a user the way PostgREST does: `set role authenticated` plus
+  `set_config('request.jwt.claims', …)`.
+
+**What it cannot verify** — and what is therefore still open — is Supabase Auth itself, Storage
+policies, and PostgREST request handling. See `/docs/SETUP.md`.
 
 ---
 
@@ -328,7 +361,12 @@ These do not change without approval recorded in `/docs/DECISIONS.md` (§17.1, `
 5. **Business logic lives in services.** Actions authenticate, validate, delegate, map errors.
 6. **Money is bigint paise.**
 7. **Timestamps UTC, business day Asia/Kolkata** — explicitly converted, never session-default.
-8. **Eleven tables.** ADR-008 declined a twelfth for merge history.
+8. **Thirteen tables** — the spec's eleven plus `outlets` and `user_outlets` (ADR-016), which are
+   organizational structure rather than CRM records. ADR-008 declined a table for merge history and
+   §4.2's rejected tables stay rejected.
+11. **Outlet scope is enforced in the database** (ADR-016). A manager's reach is
+    `user_outlets`, never a role name and never a string comparison. `branch` is retired.
+12. **ADMIN has no automatic business-data visibility** (ADR-017).
 9. **No client-side Supabase writes** — with exactly one approved exception, the ADR-005 signed
    Storage upload.
 10. **No `TODO-BD` value hard-coded anywhere.** Resolution fixed the values, not the mechanism.

@@ -2,6 +2,8 @@
 
 import { createBrowserClient } from '@supabase/ssr'
 
+import type { Database } from '@/types/database.types'
+
 import { supabaseAnonKey, supabaseUrl } from './env'
 
 /**
@@ -14,5 +16,5 @@ import { supabaseAnonKey, supabaseUrl } from './env'
  * The anon key is public and safe to expose; RLS is what protects the data (§15.7).
  */
 export function createSupabaseBrowserClient() {
-  return createBrowserClient(supabaseUrl(), supabaseAnonKey())
+  return createBrowserClient<Database>(supabaseUrl(), supabaseAnonKey())
 }

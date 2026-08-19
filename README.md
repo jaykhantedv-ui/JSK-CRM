@@ -57,4 +57,34 @@ installed — one dev-dependency (an ESLint import-boundary rule) is approved; `
 
 ## Getting started
 
-See [`docs/SETUP.md`](./docs/SETUP.md).
+```bash
+npm install
+
+# Database — the normal path, needs Docker
+npx supabase start && npm run db:reset && npm run db:types
+
+# Database — where the Supabase images cannot be pulled (ADR-018)
+scripts/db.sh start
+npm run db:reset:fixtures
+npm run db:types:nodocker
+
+cp .env.example .env.local     # fill in from `npx supabase status`
+npm run dev
+```
+
+Verify everything:
+
+```bash
+npm run verify      # typecheck -> lint -> unit -> integration -> build -> bundle check
+npm run test:e2e    # Playwright, separately
+```
+
+Full instructions, including the traps worth knowing before writing code, are in
+[`/docs/SETUP.md`](docs/SETUP.md).
+
+## Status
+
+**Master Phase 1 — platform foundation — is built and verified.** Schema, authentication, the
+outlet model, RLS, the shared service layer and generated types exist and are tested. The CRM
+feature screens do not: an unbuilt screen renders a plain "not built yet" panel rather than a
+mock, because a phase demoed on fixtures is a phase misreported.
