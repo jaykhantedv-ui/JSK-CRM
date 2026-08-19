@@ -11,6 +11,56 @@ decisions of 2026-08-19 (Project Owner) applied.
 
 ---
 
+## 0. Hosted verification — BLOCKED, attempted 2026-08-19
+
+A staging Supabase project in `ap-south-1` was to be provisioned so the platform could be verified
+through the real API. **It could not be, and nothing about it is claimed to have passed.**
+
+Two independent blockers, either of which is sufficient on its own:
+
+| Blocker | Evidence |
+|---|---|
+| **Network.** The whole Supabase domain family is denied by the environment's egress policy — control plane and data plane alike. | `api.supabase.com:443` → the gateway answers **403 to CONNECT**, recorded in the proxy's own failure log. `supabase.com` and `supabase.co` are unreachable through the proxy. |
+| **Credentials.** No Supabase account is attached to this environment. | `SUPABASE_ACCESS_TOKEN` is unset, and the official CLI reports `LegacyPlatformAuthRequiredError`. `supabase login` is an interactive browser flow and needs a human. |
+
+The block was established with **official tooling only** — `npx supabase projects list` and a
+direct request to the documented management API. **No egress restriction was bypassed and no
+unofficial endpoint was used.**
+
+### What therefore remains unverified
+
+- A Supabase project exists and its region reads back as exactly `ap-south-1`.
+- Supabase Auth: password hashing, JWT issue, session refresh over real cookies, and the built-in
+  login rate limiting of C-5.
+- PostgREST: that the policies below hold against real HTTP requests carrying a real JWT, rather
+  than against the `set role` + `request.jwt.claims` impersonation the local suite uses.
+- Storage: the bucket, its policies, signed upload and download URLs, and parent-entity visibility.
+- The SSR session architecture end to end, and each role's effective scope through the live API.
+
+### What is verified, and is not affected by the block
+
+The schema, every constraint and trigger, and **the complete RLS model** are verified against a
+real PostgreSQL 16 server (ADR-018). The local suite impersonates a user exactly as PostgREST does,
+so the policies themselves are genuinely exercised — what is untested is the transport in front of
+them, not the rules.
+
+The service-role boundary is verified by three independent controls that need no hosted project:
+the runtime browser guard in `lib/supabase/admin.ts`, the ESLint import restriction, and
+`npm run check:bundle`, which greps the built client bundle for the key and its variable name.
+
+### What to do when a project is available
+
+1. Verify the organisation and the region **before** creating anything.
+2. Create a **staging** project in `ap-south-1`. Do not provision production for this.
+3. **Read the region back from the provider** — `supabase projects list`, or
+   `GET /v1/projects/{ref}` — and confirm it is exactly `ap-south-1`. Never trust the value merely
+   because it was supplied at creation.
+4. `supabase link`, then `supabase migration up --linked`. The seventeen migrations already apply
+   cleanly from empty, twice, so this should be uneventful.
+5. Run the hosted verification set listed above, then record the result here.
+
+---
+
 ## 1. Environments (§21.1)
 
 | Environment | Where | Database | Region | Data |

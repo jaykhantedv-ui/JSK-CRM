@@ -21,7 +21,7 @@ Do not chase a coverage percentage. The gate is **the fifteen E2E scenarios plus
 | Suite | Count | Status |
 |---|---|---|
 | Unit (Vitest) | 232 | passing |
-| Integration + RLS (Vitest + PostgreSQL) | 151 | passing |
+| Integration + RLS (Vitest + PostgreSQL) | 154 | passing |
 | E2E smoke (Playwright) | 8 | passing |
 | `tsc --noEmit` | — | clean |
 | ESLint | — | clean |

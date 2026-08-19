@@ -850,6 +850,7 @@ Nothing in this audit blocks Phase 2 or Phase 3.
 | §3.1 ADMIN row | Architecture deviation | ADMIN removed from `is_manager_or_above()`; no automatic business-data read | ADR-017 | 3, 4 |
 | TODO-BD-12 `branch` | Architecture deviation | `branch` retired; `outlets` + `user_outlets` + `outlet_id`; outlet scope enforced in RLS | ADR-016 | 3, 4 |
 | M-20 (revisited) | Architecture deviation | Docker egress blocked; plain PostgreSQL + platform bootstrap + `postgres-meta` generator | ADR-018 | 3, 19 |
+| P1-05 | Architecture deviation | `opportunity_events.created_at` defaults to `clock_timestamp()` | ADR-019 | 3 |
 
 ---
 
@@ -905,7 +906,7 @@ asserts the schema has exactly one DELETE policy and that it is on `project_stak
 
 ### P1-05 — audit events written in one transaction have no defined order
 
-**Severity:** MEDIUM · **Type:** Open — needs a Project Owner decision
+**Severity:** MEDIUM · **Type:** Architecture deviation · **Resolved by:** **ADR-019**
 
 `opportunity_events.created_at` defaults to `now()`, which is **transaction start time**, and
 §16.3 requires `changeOpportunityStage`, `logActivity` and `bulkReassign` to run as single
@@ -913,8 +914,11 @@ transactions. Several events therefore share an identical timestamp routinely �
 a reassignment in one RPC — and `(opportunity_id, created_at desc)`, the index §5.9 specifies for
 reading the trail, cannot order them. The audit timeline is non-deterministic to read.
 
-**Not resolved in code.** `clock_timestamp()` would fix it in one word, but it deviates from
-§5.9's DDL and this is a judgement about how the audit trail should behave, not a defect with an
-obvious right answer. The schema is left **exactly as specified** and the question is raised for
-decision. The integration suite asserts on event content rather than order, so nothing depends on
-the ambiguity meanwhile.
+**Resolved 2026-08-19 by the Project Owner (ADR-019).** The column defaults to
+**`clock_timestamp()`**, which records the instant each row is actually written, so events from one
+transaction receive distinct and correctly ordered timestamps. Nothing else about the audit model
+changes: the trigger is still the single writer, and there is still no INSERT, UPDATE or DELETE
+policy. `013_opportunity_events.sql` had never been applied to a shared environment, so the change
+is an edit rather than a follow-on migration (§21.2). `tests/integration/audit-trail.test.ts` now
+asserts the ordering directly — several events written in one transaction come back strictly
+ordered, and their timestamps are distinct.

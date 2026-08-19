@@ -5,7 +5,7 @@ Authoritative schema: `CLAUDE_CODE_BUILD_SPEC.md` §5, §6. This document is a w
 **§5 wins any disagreement, except where an approved deviation is recorded below.**
 
 **Status: built and verified.** All seventeen migrations apply cleanly from an empty database,
-twice in a row, and are exercised by 151 integration tests against a real PostgreSQL 16 server
+twice in a row, and are exercised by 154 integration tests against a real PostgreSQL 16 server
 (ADR-018). `src/types/database.types.ts` is generated from that verified database.
 
 **Approved corrections and deviations applied to this schema:** 2026-08-19, Project Owner.
@@ -26,6 +26,8 @@ Full reasoning in `/docs/SPEC_AUDIT.md`; ADRs in `/docs/DECISIONS.md` §B.
 - **Money is `bigint` paise** — never float, never rupees in the database.
 - All timestamps are `timestamptz`, stored UTC. **All business-day logic converts to
   Asia/Kolkata explicitly** (B-10).
+- `created_at` defaults to `now()` — **except on `opportunity_events`, which uses
+  `clock_timestamp()`** so events written in one transaction stay orderable (ADR-019).
 
 > **M-08 resolved.** §5.0's "every table has …" is not literally true of the DDL —
 > `system_settings` has a `text` primary key and no `created_at`/`created_by`;
@@ -472,23 +474,22 @@ Phase 20**.
   set); the partial unique index is not deferrable and a single statement can transiently violate
   it depending on row order.
 
-## Open database questions
+## Open database questions — none
 
-One, raised while building and **not** decided unilaterally.
+### P1-05 — closed by ADR-019
 
-### P1-05 — events written in one transaction have no defined order
+`opportunity_events.created_at` defaults to **`clock_timestamp()`**, not `now()`.
 
-`opportunity_events.created_at` defaults to `now()`, which in PostgreSQL is **transaction start
-time**. §16.3 makes multi-event transactions the norm — `changeOpportunityStage` and a
-reassignment run in one RPC — so several events routinely share an identical timestamp and their
-order in the timeline is undefined.
+`now()` is transaction start time, so with §16.3 running `changeOpportunityStage`, `logActivity`
+and `bulkReassign` as single transactions, several events routinely shared one timestamp and
+`(opportunity_id, created_at desc)` — the index §5.9 specifies precisely so the trail can be read
+in order — could not separate them. `clock_timestamp()` records when each event actually happened.
 
-`clock_timestamp()` would give each row a distinct instant and is a one-word change, but it
-deviates from §5.9's DDL, so **the schema is left exactly as specified** and the question goes to
-the Project Owner. The integration suite asserts on event content rather than on order, so nothing
-depends on the ambiguity in the meantime. Recorded in `/docs/SPEC_AUDIT.md` as P1-05.
+This is the **only** column in the schema that uses it, and the difference is deliberate:
+everywhere else `created_at` means *when this row's transaction began*, and on the audit trail it
+means *when this event occurred*. Nothing else about the audit model changed.
 
-### Closed
+### Closed### Closed
 
 For the record:
 

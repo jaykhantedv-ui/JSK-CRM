@@ -18,7 +18,13 @@ create table public.opportunity_events (
   reason         text,
   metadata       jsonb not null default '{}',
   actor_id       uuid not null references public.users(id),
-  created_at     timestamptz not null default now()
+  -- ADR-019: clock_timestamp(), NOT now(). `now()` is transaction START time, so
+  -- every event written inside one transaction would share a timestamp — and
+  -- §16.3 makes multi-event transactions the norm, since changeOpportunityStage
+  -- and a reassignment run in one RPC. The trail would then be unorderable by the
+  -- very index §5.9 specifies for reading it. clock_timestamp() records when the
+  -- event actually happened, which is what an audit trail is for.
+  created_at     timestamptz not null default clock_timestamp()
 );
 
 create index opportunity_events_opp_idx   on public.opportunity_events (opportunity_id, created_at desc);

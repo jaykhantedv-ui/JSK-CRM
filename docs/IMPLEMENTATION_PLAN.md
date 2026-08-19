@@ -288,7 +288,7 @@ container registry is denied by the environment's egress policy, so `supabase st
 the approved alternative is a **real PostgreSQL 16 server** with the platform bootstrap in
 `supabase/platform/`, migrations applied by the Supabase CLI over `--db-url`, and types generated
 by `@supabase/postgres-meta`. See **ADR-018**. The migrations have since been applied cleanly from
-empty **twice in a row** and are covered by 151 integration tests.
+empty **twice in a row** and are covered by 154 integration tests.
 
 Phase 3 writes seventeen migrations whose acceptance criterion is *"`supabase db reset` applies
 the full sequence cleanly to an empty database, twice in a row"*. Writing migrations that cannot
@@ -324,14 +324,18 @@ model, RLS, the shared service layer and generated types. **No CRM feature scree
 | Authentication | ✅ email/password, SSR sessions, no self-registration, role-aware routing |
 | RLS and permissions | ✅ 39 policies, one DELETE policy, outlet scope enforced at the boundary |
 | Core services | ✅ errors · money · dates · phone · validation · permissions · transitions · settings · auth · user · outlet |
-| Tests | ✅ 232 unit · 151 integration/RLS · 8 E2E smoke |
+| Tests | ✅ 232 unit · 154 integration/RLS · 8 E2E smoke |
 | Gate | ✅ typecheck · lint · build · bundle check all clean |
+| Hosted Supabase verification | ⛔ **blocked** — egress policy denies `api.supabase.com`; no account attached. See `/docs/DEPLOYMENT.md` §0 |
 
-**Open, needing a decision:** P1-05 — events written in one transaction share a `created_at` and
-have no defined order. See `/docs/SPEC_AUDIT.md`.
+**P1-05 — closed.** `opportunity_events.created_at` defaults to `clock_timestamp()` (**ADR-019**),
+so events written in one transaction stay orderable. Covered by three regression tests.
 
-**Open, needing infrastructure:** Supabase Auth behaviour, Storage policies and PostgREST request
-handling cannot be verified until a project exists in `ap-south-1`.
+**Open, needing infrastructure — the one remaining blocker.** Hosted verification could not run:
+the Supabase control plane and data plane are both denied by this environment's egress policy, and
+no account is attached. Supabase Auth, PostgREST, Storage and the live SSR session path are
+therefore **unverified**. Attempted with official tooling only; nothing was bypassed. Full detail
+and the steps to close it are in `/docs/DEPLOYMENT.md` §0.
 
 **Not started:** every CRM feature screen, dashboards, reports, import, file uploads, cron and
 notification automation. Those are Master Phases 2–5.
@@ -551,7 +555,7 @@ configured limits, which are recorded in `/docs/DEPLOYMENT.md` once the projects
 
 > **✅ BUILT — Master Phase 1, 2026-08-19.** 39 policies across 13 tables, **one** DELETE policy
 > (`project_stakeholders`, ADR-004), RLS enabled in each table's own migration (H-04), and outlet
-> scope enforced at the database boundary (ADR-016). 151 integration tests, every one asserted
+> scope enforced at the database boundary (ADR-016). 154 integration tests, every one asserted
 > **as the restricted role**.
 
 **Spec phase:** 1–5 (written per table), audited in 8 · **Spec sections:** §3.1, §3.2, §15 (all), §19.2

@@ -371,11 +371,13 @@ the restricted role, attacking the API rather than the UI:
 
 ### What is proved today
 
-`tests/integration/` holds **151 passing assertions** covering every row above that does not
+`tests/integration/` holds **154 passing assertions** covering every row above that does not
 require Supabase Auth, Storage or PostgREST. Each impersonates a user exactly as PostgREST does —
 `set role authenticated` plus `set_config('request.jwt.claims', …)` — so a policy that would
 refuse a real request refuses these, for the same reason and with the same error code.
 
 **Still unproved, and honestly so** (ADR-018): Supabase Auth's own behaviour including login
-throttling (C-5), Storage policies, and PostgREST request handling. They need a real Supabase
-project in `ap-south-1` and are listed as open in the Master Phase 1 report.
+throttling (C-5), Storage policies, and PostgREST request handling. Hosted verification was
+attempted on 2026-08-19 with official tooling and is **blocked** — the Supabase control plane and
+data plane are both denied by the environment's egress policy and no account is attached. See
+`/docs/DEPLOYMENT.md` §0.

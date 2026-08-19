@@ -43,26 +43,27 @@ async function newOpportunity(tx: Db, stage = 'new'): Promise<string> {
 }
 
 /**
- * The events on one opportunity.
+ * The events on one opportunity, in the order they happened.
  *
- * Deliberately NOT ordered by `created_at`: the column defaults to `now()`, which
- * in PostgreSQL is transaction START time, so every event written inside one
- * transaction carries an identical timestamp and their relative order is
- * undefined. Since §16.3 makes multi-event transactions the norm — a stage change
- * and a reassignment in one RPC — that ambiguity is real rather than academic.
- * Raised as SPEC_AUDIT P1-05; these tests assert on content, not on order.
+ * Ordering by `created_at` is meaningful because the column defaults to
+ * `clock_timestamp()` rather than `now()` (ADR-019). `now()` is transaction START
+ * time, so under §16.3 — where a stage change and a reassignment run in one RPC —
+ * every event in the transaction shared one timestamp and the trail could not be
+ * ordered by the index §5.9 provides for exactly that purpose.
  */
 async function events(tx: Db, opportunityId: string) {
   const { rows } = await tx.query(
-    `select event_type, from_stage, to_stage, from_owner_id, to_owner_id, reason, actor_id
-     from public.opportunity_events where opportunity_id = $1`,
+    `select event_type, from_stage, to_stage, from_owner_id, to_owner_id, reason,
+            actor_id, created_at
+     from public.opportunity_events where opportunity_id = $1
+     order by created_at`,
     [opportunityId],
   )
   return rows as Array<Record<string, string | null>>
 }
 
 function types(rows: Array<Record<string, string | null>>): string[] {
-  return rows.map((row) => String(row.event_type)).sort()
+  return rows.map((row) => String(row.event_type))
 }
 
 function ofType(rows: Array<Record<string, string | null>>, eventType: string) {
@@ -133,7 +134,7 @@ describe('the trigger records every change', () => {
       )
 
       const rows = await events(tx, id)
-      expect(types(rows)).toEqual(['CREATED', 'REOPENED', 'WON'])
+      expect(types(rows)).toEqual(['CREATED', 'WON', 'REOPENED'])
 
       // The historical WON row is still there, untouched.
       expect(ofType(rows, 'WON')).toMatchObject({ to_stage: 'won' })
@@ -197,7 +198,71 @@ describe('the trigger records every change', () => {
       const id = await newOpportunity(tx)
       await tx.query('update public.opportunities set archived_at = now() where id = $1', [id])
       await tx.query('update public.opportunities set archived_at = null where id = $1', [id])
-      expect(types(await events(tx, id))).toEqual(['ARCHIVED', 'CREATED', 'RESTORED'])
+      expect(types(await events(tx, id))).toEqual(['CREATED', 'ARCHIVED', 'RESTORED'])
+    })
+  })
+})
+
+describe('ADR-019: events written in one transaction stay orderable', () => {
+  it('gives every event in a transaction a distinct, increasing timestamp', async () => {
+    await asPostgres(db, async (tx) => {
+      const id = await newOpportunity(tx)
+
+      // Three writes, one transaction — the shape §16.3 makes normal. Under the
+      // specified `now()` default all four rows would carry an identical
+      // timestamp and their order would be whatever the planner returned.
+      await tx.query(`update public.opportunities set stage = 'qualified' where id = $1`, [id])
+      await tx.query('update public.opportunities set owner_id = $1 where id = $2', [
+        USERS.salesA2,
+        id,
+      ])
+      await tx.query(`update public.opportunities set stage = 'selection' where id = $1`, [id])
+
+      // Ordered by created_at, so this sequence IS the ordering assertion.
+      expect(types(await events(tx, id))).toEqual([
+        'CREATED',
+        'STAGE_CHANGED',
+        'OWNER_CHANGED',
+        'STAGE_CHANGED',
+      ])
+
+      // Compared in SQL: these differ by microseconds, and a round trip through a
+      // JavaScript Date truncates to seconds and would hide the very thing under
+      // test.
+      const { rows } = await tx.query(
+        `select count(*)::int as n, count(distinct created_at)::int as distinct_n
+         from public.opportunity_events where opportunity_id = $1`,
+        [id],
+      )
+      expect(rows[0].n).toBe(4)
+      expect(rows[0].distinct_n).toBe(4)
+    })
+  })
+
+  it('records the event time, not the transaction start time', async () => {
+    await asPostgres(db, async (tx) => {
+      const id = await newOpportunity(tx)
+      await tx.query('select pg_sleep(0.05)')
+      await tx.query(`update public.opportunities set stage = 'qualified' where id = $1`, [id])
+
+      // With the specified `now()` default this would be false: every row would
+      // carry transaction_timestamp() exactly.
+      const { rows } = await tx.query(
+        `select max(created_at) > transaction_timestamp() as after_txn_start
+         from public.opportunity_events where opportunity_id = $1`,
+        [id],
+      )
+      expect(rows[0].after_txn_start).toBe(true)
+    })
+  })
+
+  it('leaves the rest of the audit model untouched', async () => {
+    await asPostgres(db, async (tx) => {
+      const { rows } = await tx.query(
+        `select cmd from pg_policies
+         where schemaname = 'public' and tablename = 'opportunity_events'`,
+      )
+      expect(rows.map((row: { cmd: string }) => row.cmd)).toEqual(['SELECT'])
     })
   })
 })

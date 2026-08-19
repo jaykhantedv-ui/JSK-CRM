@@ -7,7 +7,7 @@ Two registers:
   `system_settings`, never in code: a resolved decision fixes the *value*, it does not licence a
   constant. Changing a value must still never require a deploy.
 - **B. Architecture decision record** — stack or architecture changes. §17.1 requires the reason
-  to be recorded **before** implementing the change. **Eighteen ADRs** are accepted below.
+  to be recorded **before** implementing the change. **Nineteen ADRs** are accepted below.
 - **C. Product decisions closing the remaining audit findings** — the five product/permission
   questions the audit raised that are neither `TODO-BD` items nor architecture changes.
 
@@ -923,6 +923,59 @@ on infrastructure provisioning that is not this phase's work, and would put an u
 into a shared environment); hand-writing `database.types.ts` (forbidden, and it would stop
 reflecting the database the moment either drifted); declaring Phase 3 verified without executing
 the SQL (a fabricated result — `CLAUDE.md` §15).
+
+---
+
+### ADR-019 — `opportunity_events.created_at` defaults to `clock_timestamp()`
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Resolves:** audit **P1-05** · **Affects:** Phase 3, and every reader of the audit trail
+
+**Context.** §5.9 declares `created_at timestamptz not null default now()`. In PostgreSQL `now()`
+is **transaction start time**, identical for every statement in a transaction — it is
+`transaction_timestamp()` under another name.
+
+§16.3 requires `changeOpportunityStage`, `logActivity` and `bulkReassign` to run as **single
+transactions**, and `log_opportunity_event()` writes one row per change it observes. A stage change
+and a reassignment applied in one RPC therefore produce two events carrying an **identical**
+timestamp, and §5.9's own index — `(opportunity_id, created_at desc)`, the index that exists
+specifically so the trail can be read in order — cannot separate them. The order the timeline shows
+is whatever the planner returns, and it may differ between two reads of the same data.
+
+Multi-event transactions are the normal case here, not an edge case, so this is a defect in the
+audit trail's central promise: that it is a faithful, readable record of what happened and when.
+
+**Decision.** The column defaults to **`clock_timestamp()`**, which returns the actual wall-clock
+instant at the moment the row is written. Events written in one transaction receive distinct,
+correctly ordered timestamps.
+
+**Nothing else about the audit model changes.** The trigger remains the single writer; there is
+still no INSERT, UPDATE or DELETE policy; the reason still arrives through the `app.event_reason`
+GUC (ADR-001); the actor still falls back to the system user (ADR-003).
+
+**Consequences.**
+- A deviation from §5.9's DDL — the deviation being approved here. It is a **correction toward the
+  spec's stated intent** rather than away from it: §5.9 exists so that "no path can bypass the
+  audit", and an audit nobody can order is not one that can be relied on.
+- `created_at` on this table now means *when the event happened*, while `created_at` elsewhere in
+  the schema means *when the row's transaction began*. That difference is deliberate and is exactly
+  the distinction between an audit log and an ordinary record.
+- The change is confined to `013_opportunity_events.sql`, which **has never been applied to any
+  shared environment** — no hosted project exists — so §21.2's append-only rule is not engaged.
+  Once a shared environment exists, a change like this becomes a new migration.
+- `clock_timestamp()` is `VOLATILE`. That is fine in a column default, and the column is not used
+  in an index expression or a generated column, so nothing else is affected.
+- An event timestamp may now be **later** than the `updated_at` of the opportunity that caused it,
+  by microseconds. Readers must not assume the two are equal; they never meaningfully were.
+
+**Alternatives considered.**
+- *Leave `now()` and order by a tiebreaker.* There is none: the primary key is a random uuid, and
+  adding a sequence column to an append-only table to work around a wrong default is more schema
+  for a worse result.
+- *Order by `id`.* `gen_random_uuid()` is not monotonic; this would produce a stable but
+  **arbitrary** order, which is worse than an obviously unstable one because it looks correct.
+- *`statement_timestamp()`.* Distinguishes statements but not two rows written by one trigger
+  invocation, which is precisely the case §16.3 creates.
 
 ---
 
