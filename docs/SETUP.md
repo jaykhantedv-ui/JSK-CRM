@@ -82,24 +82,54 @@ machine.
 
 ## 4. Start the local database
 
+The Supabase CLI is pinned as a devDependency, so every developer runs the same
+version. All commands are wrapped as npm scripts:
+
 ```bash
-supabase start                 # first run pulls Docker images
-supabase status                # prints local URL, anon key, service-role key
+npm run db:start     # supabase start — first run pulls ~16 Docker images
+npm run db:status    # supabase status — prints local URL, anon key, service-role key
+npm run db:stop      # supabase stop
 ```
+
+`db:start` prints the local credentials. Paste them into `.env.local`:
+
+```
+NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key from db:status>
+SUPABASE_SERVICE_ROLE_KEY=<service_role key from db:status>
+```
+
+These are local-only development keys. **`.env.local` is gitignored and must never
+be committed.**
 
 Apply migrations and seed:
 
 ```bash
-supabase db reset              # applies /supabase/migrations in order, then /supabase/seed
+npm run db:reset     # applies /supabase/migrations in order, then /supabase/seed
+npm run db:push      # pushes local migrations to the linked project
 ```
 
-`db reset` must succeed against an **empty** database, twice in a row (§23.9).
+`db:reset` must succeed against an **empty** database, twice in a row (§23.9).
 
-Generate types after any schema change:
+### Type generation — repeatable
 
 ```bash
-supabase gen types typescript --local > src/types/database.types.ts
+npm run db:types     # supabase gen types typescript --local > src/types/database.types.ts
 ```
+
+Run it after **every** schema change and commit the result. `src/types/database.types.ts`
+is generated, never hand-edited. It does not exist until the first migration lands in
+Phase 3 — the schema is empty until then, and a generated file is not fabricated to
+fill the gap.
+
+**Always use the generated enum types.** `opportunity_stage` values are lowercase while
+every other enum is uppercase — a handwritten `'WON'` fails at runtime, not compile time
+(M-23).
+
+> **Docker is required.** `supabase start` pulls images from Docker Hub, `ghcr.io` and
+> the Docker blob CDN. A network that blocks any of those cannot run the local stack;
+> see `/docs/IMPLEMENTATION_PLAN.md` Phase 2 for the constraint recorded during
+> implementation.
 
 **Always use the generated enum types.** `opportunity_stage` values are lowercase while every
 other enum is uppercase — a handwritten `'WON'` fails at runtime, not compile time (M-23).

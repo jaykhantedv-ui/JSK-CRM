@@ -252,10 +252,17 @@ Vercel + Supabase hosting · Vitest + Playwright.
 API server · a native mobile app · real-time subscriptions · state-management libraries
 (no Redux, no Zustand).
 
-**Two additions considered and declined** (audit M-13, M-14), keeping the stack frozen:
-- UTC→`Asia/Kolkata` rendering uses **`Intl.DateTimeFormat` with `timeZone`**, not `date-fns-tz`.
+**Three additions considered and declined**, keeping the stack frozen:
+- UTC→`Asia/Kolkata` rendering uses **`Intl.DateTimeFormat` with `timeZone`**, not `date-fns-tz`
+  (audit M-13).
 - Magic-byte MIME verification is a **hand-rolled signature check** for the four allowed types
-  (JPEG, PNG, WebP, PDF), not the `file-type` package.
+  (JPEG, PNG, WebP, PDF), not the `file-type` package (audit M-14).
+- **`server-only`** — proposed during Phase 2 to add a build-time error when
+  `lib/supabase/admin.ts` is reached from client code. **Declined 2026-08-19 by the Project
+  Owner.** The three-layer admin boundary already approved is sufficient: (1) the runtime browser
+  guard on module evaluation and on the factory, (2) the ESLint import restriction confining the
+  module to its three ADR-009 callers, and (3) client-bundle verification plus the guard unit
+  tests. A fourth dependency buys no control the first three do not already provide.
 
 **One addition approved** (audit M-30): an ESLint import-boundary rule
 (`import/no-restricted-paths` or equivalent) to enforce §18's no-cross-feature-import rule.

@@ -39,8 +39,13 @@ not an edit; it is a new project and a full data migration.
 
 | Project | Region | Project ref | Provisioned | Verified by |
 |---|---|---|---|---|
-| Staging | `ap-south-1` | *(not yet provisioned)* | — | — |
-| Production | `ap-south-1` | *(not yet provisioned)* | — | — |
+| Staging | `ap-south-1` (required) | *(not yet provisioned)* | — | — |
+| Production | `ap-south-1` (required) | *(not yet provisioned)* | — | — |
+
+**Phase 2 status:** neither project has been created. Provisioning requires explicit
+approval per firing, because the region cannot be changed afterwards. The region must be
+**read back from the created project and recorded in this table** before any data is
+written — selecting it in a form is not verification.
 
 ---
 
