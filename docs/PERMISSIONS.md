@@ -1,6 +1,7 @@
 # Permissions
 
-Derived from `CLAUDE_CODE_BUILD_SPEC.md` §3, §15. **Nothing here has been built yet.**
+Derived from `CLAUDE_CODE_BUILD_SPEC.md` §3, §15, with the approved corrections of 2026-08-19
+(Project Owner) applied. **Nothing has been built yet.**
 
 > **RLS is the security boundary. Frontend filtering is not a control. A hidden button is never a
 > control.** Every permission below must hold against a **direct PostgREST call** carrying a
@@ -12,10 +13,19 @@ Derived from `CLAUDE_CODE_BUILD_SPEC.md` §3, §15. **Nothing here has been buil
 
 Four values on `users.role`: `SALESPERSON`, `MANAGER`, `OWNER`, `ADMIN`.
 
-- **No self-registration.** Users are created by OWNER or ADMIN (§3.2).
+- **No self-registration.** Users are created by OWNER or ADMIN (§3.2), through a Server Action
+  that uses the service-role client **only after a server-side OWNER/ADMIN check** (ADR-009).
 - Deactivating a user (`is_active = false`) blocks login. Their records are never deleted;
   **ownership must be reassigned separately** as an explicit action.
 - **ADMIN is a system/data role, not a sales role:** no dashboards, no reassignment, no export.
+  ADMIN's landing route is **`/settings`** (M-01), not `/dashboard`.
+
+### The system user (ADR-003)
+
+One additional row exists in `public.users`: a dedicated **system user** that is the `actor_id`
+for service-role automated writes (cron, import). It is seeded **`is_active = false`**, so
+`user_role()` returns null for it and **it can never authenticate or satisfy any policy**. It is
+excluded from `/team`, workload reporting, user lists and every digest.
 
 ---
 
@@ -29,7 +39,7 @@ Four values on `users.role`: `SALESPERSON`, `MANAGER`, `OWNER`, `ADMIN`.
 | Create accounts, contacts, projects, opportunities, activities | ✔ | ✔ | ✔ | ✔ |
 | Edit own-owned records | ✔ | ✔ | ✔ | ✔ |
 | Edit any record | ✘ | ✔ | ✔ | ✔ |
-| **Assign / reassign ownership** | ✘ | ✔ | ✔ | **✘** |
+| **Assign / reassign ownership** | ✘ | ✔ | ✔ | **✘ — enforced by `can_reassign()`** |
 | **Archive / restore records** | ✘ | ✔ | ✔ | ✔ |
 | **Hard delete anything** | ✘ | ✘ | ✘ | ✘ |
 | **Export CSV** | ✘ | ✔ | ✔ | ✘ |
@@ -39,17 +49,27 @@ Four values on `users.role`: `SALESPERSON`, `MANAGER`, `OWNER`, `ADMIN`.
 | Edit system settings / controlled values | ✘ | ✘ | ✔ | ✔ |
 | View audit trail | ✘ | ✔ (own team) | ✔ | ✔ |
 
-Two rows are not currently satisfiable as written:
+**H-05 resolved.** "Assign/reassign — ADMIN ✘" is now enforceable: a dedicated
+**`can_reassign() = MANAGER, OWNER`** helper replaces `is_manager_or_above()` on every
+ownership-change gate. Every §15 write policy previously gated on `is_manager_or_above()`, which
+includes ADMIN and therefore contradicted §3.1.
 
-- **Assign/reassign — ADMIN ✘.** Every write policy in §15 gates on `is_manager_or_above()`, which
-  includes ADMIN. A separate `can_reassign()` = `MANAGER, OWNER` helper is required.
-  (`/docs/SPEC_AUDIT.md` **H-05**.)
-- **View audit trail — MANAGER (own team).** There is no team model on `users` (no `team_id`, no
-  `manager_id`) and no audit route in §12.2, so neither the scope nor the surface exists.
-  (`/docs/SPEC_AUDIT.md` **H-13**.)
+**H-13 resolved (C-1).** **V1 has one manager**, so "own team" is **the salespeople operating
+under the current single-manager structure**. **No `team_id`, no `manager_id`** — no team model
+enters the schema. The trail is surfaced **in the opportunity detail timeline**, where audit
+events are **visually and semantically distinguishable from activities** (§10.1 keeps them
+separate). **No `/audit` route in V1.** No policy change is needed: `opportunity_events` SELECT is
+already gated on `can_see_opportunity()`, which yields exactly this scope. If a second manager is
+ever hired, "own team" becomes a real question again — a V2 decision.
 
-Also inconsistent: **Export CSV** is granted to MANAGER but lives on `/settings`, which MANAGER
-cannot reach; ADMIN can reach `/settings` but has export ✘ (`/docs/SPEC_AUDIT.md` M-02).
+**M-02 resolved (C-2).** **Manager CSV export is available directly from the manager-accessible
+list and report screens** — `/opportunities`, `/accounts`, `/projects`, `/team`, `/reports` —
+exporting the current filtered view. It does **not** live only under `/settings`. OWNER keeps the
+§21.4 `/settings` bulk export as well. **The ADMIN restriction is preserved**: the control is not
+rendered for ADMIN **and** the Server Action rejects ADMIN — a hidden button is not a control
+(§19.4). Export is therefore a capability check (`role in (MANAGER, OWNER)`) applied at the
+action, not a property of a route, and exported rows are scoped by RLS so an export and a screen
+always agree.
 
 ---
 
@@ -68,8 +88,13 @@ So a salesperson sees:
 
 MANAGER, OWNER and ADMIN see everything.
 
-*(§23.1's "salesperson sees only their own accounts" understates this — `/docs/SPEC_AUDIT.md`
-M-16.)*
+**M-16 resolved.** §23.1's "salesperson sees only their own accounts in list, search and counts"
+understated this and would have failed correct behaviour. **The acceptance tests are corrected to
+own accounts *plus* work-context accounts.**
+
+**M-15 resolved.** §13.2's claim that `/today` tiles are "scoped to `owner_id = current user` by
+RLS" is true only for SALESPERSON. `/today` is available to all roles and MANAGER/OWNER/ADMIN pass
+`is_manager_or_above()`, so **`/today` queries must filter by the current owner explicitly.**
 
 ---
 
@@ -77,28 +102,40 @@ M-16.)*
 
 A policy that reads `public.users` to find the caller's role **will recurse** when applied to
 `public.users` itself. §25 names this as the most likely early blocker. The answer is
-`SECURITY DEFINER` helpers:
+`SECURITY DEFINER` helpers.
 
-| Function | Returns |
-|---|---|
-| `user_role()` | The caller's role, or null when `is_active` is false |
-| `is_manager_or_above()` | `MANAGER`, `OWNER`, `ADMIN` |
-| `is_owner_or_admin()` | `OWNER`, `ADMIN` |
-| `can_reassign()` **(required, not in §15.1)** | `MANAGER`, `OWNER` — see H-05 |
-| `owns_opportunity_on_account(uuid)` | Work-context read grant |
-| `owns_opportunity_on_project(uuid)` | Work-context read grant |
-| `can_see_account/project/opportunity/activity(uuid)` **(required, not in §15.1)** | Visibility predicates the §15.5 and §15.6 policies describe in prose — see H-12 |
+| Function | Returns | Notes |
+|---|---|---|
+| `user_role()` | The caller's role, or null when `is_active` is false | |
+| `is_manager_or_above()` | `MANAGER`, `OWNER`, `ADMIN` | Read and general-edit gates |
+| `is_owner_or_admin()` | `OWNER`, `ADMIN` | Settings, import, user management |
+| **`can_reassign()`** | **`MANAGER`, `OWNER`** | **New — H-05.** The only gate for ownership changes |
+| `owns_opportunity_on_account(uuid)` | Work-context read grant | Created after `opportunities` (B-04) |
+| `owns_opportunity_on_project(uuid)` | Work-context read grant | Created after `opportunities` (B-04) |
+| **`can_see_account(uuid)`** | Visibility predicate | **New — H-12** |
+| **`can_see_project(uuid)`** | Visibility predicate | **New — H-12** |
+| **`can_see_opportunity(uuid)`** | Visibility predicate | **New — H-12** |
+| **`can_see_activity(uuid)`** | Visibility predicate | **New — H-12** |
 
-All are `stable`, `security definer`, `set search_path = public`. **Revoke `execute` from `anon`;
-grant to `authenticated`.**
+All are `stable`, `security definer`, **`set search_path = public`** (which prevents search-path
+hijacking of a definer function), with **least privilege**: `revoke execute from anon`,
+`grant execute to authenticated`.
 
-Because `user_role()` returns null for a deactivated user, every policy denies them — the practical
-effect of deactivation is immediate, though an already-issued JWT is not revoked
-(`/docs/SPEC_AUDIT.md` M-25).
+They must be `SECURITY DEFINER` specifically **so they do not re-enter the policies they support**.
 
-**Performance:** wrap each helper call as `(select public.fn(...))` inside policies so PostgreSQL
-evaluates it once as an InitPlan rather than per row. This is the main threat to the §12.8 latency
-budget (`/docs/SPEC_AUDIT.md` M-19).
+**B-04 resolved — creation order.** Role helpers are created before the business tables; the
+work-context and `can_see_*` helpers **after** the tables they reference, because PostgreSQL
+validates `language sql` bodies at creation time.
+
+**M-19 resolved — performance.** Wrap each helper call as **`(select public.fn(...))`** inside
+policies so PostgreSQL evaluates it once as an InitPlan rather than per row. This is the main
+threat to the §12.8 latency budget and is measured in Phase 5.
+
+Because `user_role()` returns null for a deactivated user, every policy denies them.
+**M-25 resolved — documented behaviour:** deactivation takes effect immediately at the policy
+layer, while the already-issued JWT itself remains valid until it expires. The practical result is
+an app that denies every read and write, not a clean sign-out. §19.4's session-expiry test asserts
+this.
 
 ---
 
@@ -106,17 +143,25 @@ budget (`/docs/SPEC_AUDIT.md` M-19).
 
 For every table: `SELECT`, `INSERT`, `UPDATE`.
 
-> **No `DELETE` policy on any business table for any role.**
+> **No `DELETE` policy on any table — with exactly one approved exception.**
 
-⚠ §15.3's `users_admin_all … for all` includes DELETE and must be enumerated as three separate
-policies instead (`/docs/SPEC_AUDIT.md` **H-06**).
+**H-06 resolved.** §15.3's `users_admin_all … for all` silently included DELETE, contradicting
+§3.1's "hard delete: nobody". **The `FOR ALL` policy is removed** and the permitted operations are
+enumerated as separate `for select` / `for insert` / `for update` policies. Enumerating makes the
+grant auditable.
+
+**ADR-004 (B-08) — the one exception.** `project_stakeholders` carries a `DELETE` policy, scoped
+identically to its `UPDATE` policy, because the row is a relationship/link rather than a business
+entity. `accounts`, `contacts`, `projects`, `opportunities`, `activities`, `opportunity_events`,
+`users`, `system_settings`, `import_batches` and `import_rows` remain **undeletable by every role,
+including OWNER**. A reviewer should be able to grep for `for delete` and find exactly one policy.
 
 ### `users` (§15.3)
 
 - SELECT: self, or manager+.
 - UPDATE self: `with check (id = auth.uid() and role = public.user_role())` — **this clause is what
   prevents self-escalation.** A salesperson editing their own profile cannot change their role.
-- OWNER/ADMIN: full management (SELECT/INSERT/UPDATE, **not** DELETE).
+- OWNER/ADMIN: enumerated SELECT / INSERT / UPDATE. **No `FOR ALL`. No DELETE** (H-06).
 
 ### `accounts` — the pattern all business tables follow (§15.4)
 
@@ -130,52 +175,76 @@ the `with check`.
 
 ### Remaining tables (§15.5)
 
-| Table | SELECT | INSERT | UPDATE |
-|---|---|---|---|
-| `contacts` | manager+ · own · contact of an account the caller can see | owner = self, or manager+ | manager+ or own |
-| `projects` | manager+ · own · `owns_opportunity_on_project(id)` | owner = self, or manager+ | manager+ or own |
-| `project_stakeholders` | caller can see the parent project | caller can update the parent project | same |
-| `opportunities` | manager+ · `owner_id = auth.uid()` | `owner_id = auth.uid()` or manager+ | manager+ (any field) · own (any field **except** `owner_id`) |
-| `activities` | caller can see the parent account | `performed_by = auth.uid()`, and caller can see the account | **author only, and `created_at > now() - 24h`** |
-| `opportunity_events` | caller can see the parent opportunity | service-role and triggers only | **none** |
-| `system_settings` | all authenticated (read) | owner/admin | owner/admin |
-| `import_batches` / `import_rows` | owner/admin | owner/admin | owner/admin |
+| Table | SELECT | INSERT | UPDATE | DELETE |
+|---|---|---|---|---|
+| `contacts` | manager+ · own · `can_see_account(account_id)` | owner = self, or manager+ | manager+ or own | **none** |
+| `projects` | manager+ · own · `owns_opportunity_on_project(id)` | owner = self, or manager+ | manager+ or own | **none** |
+| `project_stakeholders` | `can_see_project(project_id)` | caller can update the parent project | same | **permitted — ADR-004** |
+| `opportunities` | manager+ · `owner_id = auth.uid()` | `owner_id = auth.uid()` or manager+ | manager+ · own — **`owner_id` changes denied entirely; use the RPC** | **none** |
+| `activities` | `can_see_account(account_id)` | `performed_by = auth.uid()`, and caller can see the account | **author only, and `created_at > now() - 24h`** | **none** |
+| `opportunity_events` | `can_see_opportunity(opportunity_id)` | triggers only | **none** | **none** |
+| `system_settings` | all authenticated (read) | owner/admin | owner/admin | **none** |
+| `import_batches` / `import_rows` | owner/admin | owner/admin | owner/admin | **none** |
 
-### `opportunities.owner_id` — use the RPC
+**H-04 resolved.** RLS is enabled and these policies are created **in each table's own creation
+migration**, not deferred to a single `015`. `015_rls_policies` becomes an audit/hardening pass.
+Otherwise every environment between Phase 3 and Phase 8 would be fully readable and writable by
+any authenticated user.
 
-§15.5 offers a `with check` expression to express "any field except `owner_id`". **That expression
-is invalid SQL and recursive** — unqualified `id` binds to the inner alias, the subquery returns
-every row, and reading `opportunities` inside an `opportunities` policy recurses
-(`/docs/SPEC_AUDIT.md` **B-02**).
+### `opportunities.owner_id` — use the RPC (B-02 resolved)
 
-§15.5 itself gives the answer: *"implement reassignment exclusively through a `SECURITY DEFINER`
-RPC (`reassign_opportunity`) that checks the role itself, and deny `owner_id` changes in the table
-policy entirely. **Prefer the RPC — it is easier to test and audit.**"* The RPC must check
-`can_reassign()`, not `is_manager_or_above()` (H-05).
+§15.5 offered a `with check` expression to express "any field except `owner_id`". **That
+expression is invalid SQL and recursive** — unqualified `id` binds to the inner alias, so the
+subquery returns every row, and reading `opportunities` inside an `opportunities` policy recurses.
+**It must never be written into a migration.**
+
+**Resolution:** `owner_id` changes are **denied in the table policy entirely**. Reassignment goes
+exclusively through the `SECURITY DEFINER` **`reassign_opportunity`** RPC, which checks
+**`can_reassign()`** itself — not `is_manager_or_above()`, so **ADMIN is excluded** (H-05).
+§15.5 states the same preference: *"Prefer the RPC — it is easier to test and audit."*
+`bulk_reassign` follows the same pattern.
 
 ---
 
 ## 6. Storage (§15.6)
 
-Bucket `crm-files`, **private**. Path convention
-`{entity_type}/{entity_id}/{uuid}-{filename}`.
+Bucket `crm-files`, **private**. Path convention `{entity_type}/{entity_id}/{uuid}-{filename}`.
 
-- Authenticated users may `INSERT`.
-- `SELECT` requires **visibility of the parent entity**, checked by a policy function that parses
-  the path prefix — which needs the `can_see_*` helpers from H-12.
+- **Upload (ADR-005 / B-09).** The browser uploads directly against a **server-issued signed
+  upload URL**. The URL is **short-lived**, and it is issued **only after a server-side check that
+  the caller can see the parent entity**. **All database writes remain server-side** — the row
+  referencing the file is written by a Server Action. This is the **only** permitted client-side
+  Supabase write, approved because 10 MB exceeds the platform request-body limit.
+- **Read.** `SELECT` requires **visibility of the parent entity**, checked by a policy function
+  that parses the path prefix using the `can_see_*` helpers (H-12).
 - **No public URLs.** Serve via signed URLs with a **60-second expiry**.
-- Validation: **max 10 MB**, MIME allow-list (`image/jpeg`, `image/png`, `image/webp`,
-  `application/pdf`), **verified by magic bytes server-side, not by extension**.
+- **Validation.** Max **10 MB**; MIME allow-list (`image/jpeg`, `image/png`, `image/webp`,
+  `application/pdf`) verified by a **hand-rolled magic-byte signature check, not by extension**
+  (M-14).
 
 ---
 
 ## 7. Additional controls (§15.8)
 
 Passwords via Supabase Auth (**no custom hashing**) · sessions in **httpOnly cookies** via
-`@supabase/ssr` · rate-limit login attempts · **all mutations validated server-side with Zod
-regardless of client validation** · no raw SQL string interpolation · security headers (CSP, HSTS,
+`@supabase/ssr` · rate-limit login attempts (**C-5 / M-12 resolved** — **Supabase Auth's
+built-in authentication rate limiting**, with **no Redis or other distributed infrastructure**;
+throttling surfaces as a plain-language message that leaks no implementation detail, no
+retry-after internal and no hint of which credential was wrong, and it is covered by automated
+tests) · **all mutations validated server-side with Zod regardless of
+client validation** · no raw SQL string interpolation · security headers (CSP, HSTS,
 `X-Frame-Options: DENY`, `nosniff`) · **never log tokens, keys or full request bodies containing
 personal data**.
+
+**M-03 resolved.** Unauthorised record access returns **404 / not-found**, never a screen that
+confirms the record exists. §12.6's "Forbidden" state is reserved for route-level denial where no
+record identity is revealed.
+
+**Service-role key (§15.7, ADR-009).** Three permitted callers: **cron routes**, **the import
+executor**, and **the user-provisioning Server Action** — the last only after a server-side
+OWNER/ADMIN check, performed **before** the admin client is touched. `lib/supabase/admin.ts`
+throws if `typeof window !== 'undefined'`, and the security suite greps the build output for the
+key.
 
 ---
 
@@ -188,13 +257,22 @@ Every capability row needs a passing **positive** test and a passing **negative*
 the restricted role, attacking the API rather than the UI:
 
 - Salesperson A cannot SELECT, UPDATE, or INSERT-on-behalf-of salesperson B's records.
-- Salesperson **can** read an account they do not own when they own an opportunity on it.
+- Salesperson **can** read an account they do not own when they own an opportunity on it — and
+  its contacts and projects by the same route (H-12, M-16).
 - Salesperson cannot change `owner_id` by any route — table UPDATE, PostgREST, or the RPC.
-- ADMIN cannot reassign; MANAGER and OWNER can.
-- **No role can DELETE from any business table.**
+- **ADMIN cannot reassign** (H-05); MANAGER and OWNER can.
+- **DELETE fails on all ten tables and succeeds only on `project_stakeholders`** (H-06, ADR-004),
+  asserted table by table, including `users`.
 - A salesperson cannot escalate their own role via a profile update.
+- **A salesperson calling the user-provisioning action is rejected before any admin client call**
+  (ADR-009).
 - Direct PostgREST calls with salesperson credentials fail for cross-user reads.
-- Storage objects are unreadable without visibility of the parent entity.
+- Storage objects are unreadable without visibility of the parent entity; an upload URL is not
+  issued without it either.
 - The service-role key is absent from the built client bundle (verified by grepping the build).
+- A manager's `/today` shows only their own work, not the company's (M-15).
+- **ADMIN cannot export through the Server Action**, not merely through a hidden button (C-2).
+- **Repeated failed logins throttle**, the provider error maps to `AppError`, and the message
+  leaks no implementation detail (C-5).
 - E2E scenario 13: a salesperson cannot reach another's opportunity by direct URL **or via a
   direct Supabase query from the browser console**.

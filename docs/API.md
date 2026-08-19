@@ -19,9 +19,9 @@ There is no REST or GraphQL API surface of our own. The three call paths are:
 | Writes | Client → **Server Action** → service → client or RPC | User session cookie | Applies |
 | Scheduled | Vercel Cron → `/api/cron/*` → service | `CRON_SECRET` bearer token | **Bypassed** (service-role) |
 
-Client Components may read via TanStack Query for lists and filters. **They never write.**
-(One pending carve-out: a browser Storage upload against a server-issued signed URL —
-`/docs/SPEC_AUDIT.md` **B-09**.)
+Client Components may read via TanStack Query for lists and filters. **They never write** — with
+one approved exception: a browser Storage upload against a **server-issued signed upload URL**
+(**ADR-005**), where the database row is still written by a Server Action.
 
 ---
 
@@ -52,8 +52,8 @@ createProject(input): Promise<Project>
 updateProject(id, input): Promise<Project>
 archiveProject(id): Promise<void>
 addProjectStakeholder(projectId, input): Promise<ProjectStakeholder>
-removeProjectStakeholder(stakeholderId): Promise<void>      // ⚠ see B-08
-setPrimaryStakeholder(projectId, stakeholderId): Promise<void>   // ⚠ see M-09
+removeProjectStakeholder(stakeholderId): Promise<void>      // deletes the link row — ADR-004
+setPrimaryStakeholder(projectId, stakeholderId): Promise<void>   // two statements, one transaction
 ```
 
 ### Opportunities
@@ -63,7 +63,7 @@ updateOpportunity(id, input): Promise<Opportunity>
 changeOpportunityStage(id, toStage, payload, reason?): Promise<Opportunity>
 markOpportunityWon(id, { finalOrderValue, orderReference? }): Promise<Opportunity>
 markOpportunityLost(id, { lostReason, lostDetail?, competitor? }): Promise<Opportunity>
-reopenOpportunity(id, reason): Promise<Opportunity>            // MANAGER/OWNER  ⚠ see H-11
+reopenOpportunity(id, reason): Promise<Opportunity>            // MANAGER/OWNER — won → qualified (ADR-007)
 assignOpportunity(id, userId, reason?): Promise<Opportunity>   // MANAGER/OWNER
 reassignOpportunity(id, userId, reason): Promise<Opportunity>  // MANAGER/OWNER
 bulkReassign(fromUserId, toUserId, reason): Promise<BulkResult> // MANAGER/OWNER
@@ -124,8 +124,9 @@ Postgres check-constraint violations are **caught and mapped by constraint name*
 |---|---|
 | `won_requires_value` | "Enter the confirmed order value before marking this won." |
 | `won_requires_closed` | *(service sets `closed_at`; a violation here is an internal bug)* |
+| `account_reachable` | "Add a phone number or an email for this customer." |
 | `lost_requires_reason` | "Choose a reason before marking this lost." |
-| `quoted_requires_quotation` | "Add the quotation reference, date and value before moving to Quoted." |
+| `quoted_requires_quotation` | "Add the quotation reference, date and value before moving to Quoted." *(binds `quoted` only — ADR-006)* |
 | `next_action_pairing` | "Set both the next action and its date, or neither." |
 | `nurture_needs_date` | "Nurture needs a date to come back to this." |
 | `contact_reachable` | "Add a phone number or an email for this person." |
@@ -150,7 +151,7 @@ Multi-table writes go through a Postgres RPC so they are atomic and **RLS still 
 |---|---|---|
 | `create_account_with_opportunity` | §11.1 primary mobile flow | account (owner = caller, status `PROSPECT`) → opportunity (stage `new`, auto title) → activity (`NOTE` / `ENQUIRY`) → `CREATED` event via trigger |
 | `log_activity` | `logActivity()` | activity → `accounts.last_activity_at` → `opportunities.last_activity_at` → next-action decision → returns the updated opportunity |
-| `change_opportunity_stage` | `changeOpportunityStage()` | opportunity update → stage event via trigger (+ reason, pending **B-01**) |
+| `change_opportunity_stage` | `changeOpportunityStage()` | opportunity update → stage event via trigger; the reason reaches the event row through the transaction-local `app.event_reason` GUC (**ADR-001**) |
 | `reassign_opportunity` | `assign/reassignOpportunity()` | `owner_id` — **`SECURITY DEFINER`**, checks `can_reassign()` itself (§15.5, **B-02**, **H-05**) |
 | `bulk_reassign` | `bulkReassign()` | many opportunities + owner events |
 | `execute_import` | `executeImport()` | the whole batch, service-role (§20.5, **H-08**) |
@@ -237,6 +238,7 @@ as type declarations only. **Do not write fake adapters** (§16.4, `CLAUDE.md` �
 
 - Zod schemas live in `src/features/*/schemas.ts` and are shared client and server.
 - **All mutations are validated server-side with Zod regardless of client validation** (§15.8).
-- Validation mirrors the database constraints; it does not replace them. Where the two can
-  disagree — for example `accounts` has no database-level "phone or email" constraint
-  (`/docs/SPEC_AUDIT.md` M-05) — the gap is documented, not silently patched.
+- Validation mirrors the database constraints; it does not replace them. **Database integrity is
+  authoritative.** `accounts` now carries `account_reachable check (phone is not null or email is
+  not null)` (**ADR-013**), matching `contacts.contact_reachable`, so the phone-or-email rule
+  cannot be defeated by a service-layer bug or a faulty import validator.

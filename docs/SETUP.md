@@ -1,10 +1,14 @@
 # Setup
 
 How to get a development environment running. Derived from `CLAUDE_CODE_BUILD_SPEC.md` §17.4,
-§21.1, §5.12.
+§21.1, §5.12, with the approved decisions of 2026-08-19 applied.
 
 > **The application has not been built yet.** This document describes the intended setup and is
 > updated as each phase lands (§22.1 step 9). Steps marked *(not yet)* do not work today.
+>
+> **Local Supabase under Docker is permitted at any time** — it creates nothing irreversible.
+> **Staging and production provisioning waits for the Decision Gate** (see
+> `/docs/IMPLEMENTATION_PLAN.md`).
 
 ---
 
@@ -14,7 +18,7 @@ How to get a development environment running. Derived from `CLAUDE_CODE_BUILD_SP
 |---|---|---|
 | Node.js | 20 LTS or later | Next.js 15 |
 | npm | bundled with Node | Lockfile is npm |
-| Docker Desktop | current | `supabase start` runs Postgres locally |
+| Docker Desktop | current | `supabase start` runs Postgres locally; **also required in CI** for the integration suite (M-20) |
 | Supabase CLI | current | Migrations, type generation, local stack |
 | Git | current | |
 
@@ -41,23 +45,38 @@ Copy the template and fill it in. **`.env.example` is committed; `.env.local` is
 cp .env.example .env.local
 ```
 
+### From §17.4
+
 | Variable | Scope | Notes |
 |---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | client + server | Local: printed by `supabase start` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client + server | RLS applies; safe to expose |
-| `SUPABASE_SERVICE_ROLE_KEY` | **server only** | **Never in a client bundle.** Cron and import only |
+| `SUPABASE_SERVICE_ROLE_KEY` | **server only** | **Never in a client bundle.** Three permitted callers — see §7 |
 | `DATABASE_URL` | migrations only | |
 | `RESEND_API_KEY` | server only | Email |
 | `CRON_SECRET` | server only | Bearer token for `/api/cron/*` |
 | `NEXT_PUBLIC_APP_URL` | client + server | |
-| `TZ=Asia/Kolkata` | server | Sets the **Node** timezone. **It does not affect Postgres** — see §7 below |
+| `TZ=Asia/Kolkata` | server | Sets the **Node** timezone. **It does not affect Postgres** — see §7 |
 
-**Nothing is hard-coded.** `.env.example` documents every variable with placeholder values only —
-never a real key.
+### Approved additions (M-28)
 
-Additional variables the spec's own requirements imply but §17.4 omits
-(`/docs/SPEC_AUDIT.md` M-28), pending approval: a Resend verified sender address, Supabase CLI
-credentials for pipeline migrations, and Playwright base URL plus per-role test-user credentials.
+§17.4's list is incomplete for what §14, §19 and §21 actually require. These are approved and
+belong in `.env.example`:
+
+| Variable | Scope | Why |
+|---|---|---|
+| `RESEND_FROM_EMAIL` | server | **No email sends without a verified sender domain** |
+| `SUPABASE_ACCESS_TOKEN` | CI | Supabase CLI auth for pipeline migrations |
+| `SUPABASE_PROJECT_REF` | CI | Target project for the pinned migration command (M-17) |
+| `PLAYWRIGHT_BASE_URL` | CI/local | E2E target |
+| `TEST_{SALESPERSON,MANAGER,OWNER,ADMIN}_EMAIL` / `_PASSWORD` | CI/local | Per-role credentials — the RLS and E2E suites must run **as the restricted role**, never as OWNER (§23) |
+
+The weekly backup job's secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
+`AWS_BACKUP_BUCKET`, and a separate read-capable `DATABASE_URL`) live in **GitHub Actions**, not
+in `.env.local` and not in Vercel — see `/docs/DEPLOYMENT.md` §7.2. They never touch a developer
+machine.
+
+**Nothing is hard-coded.** `.env.example` contains placeholder values only — never a real key.
 
 ---
 
@@ -82,6 +101,9 @@ Generate types after any schema change:
 supabase gen types typescript --local > src/types/database.types.ts
 ```
 
+**Always use the generated enum types.** `opportunity_stage` values are lowercase while every
+other enum is uppercase — a handwritten `'WON'` fails at runtime, not compile time (M-23).
+
 ---
 
 ## 5. Run the app
@@ -93,35 +115,83 @@ npm run dev                    # (not yet — Phase 1)
 Log in with the seeded OWNER from `/supabase/seed/seed.sql`. The Phase 1 gate is: *a new developer
 can clone, run, log in as the seeded OWNER, and create a salesperson who can log in* (§22).
 
+ADMIN accounts land on **`/settings`**, not `/dashboard` (M-01) — ADMIN is a system/data role with
+no dashboards.
+
 ---
 
 ## 6. Run the tests
 
 ```bash
 npm run test              # Vitest — unit
-npm run test:integration  # Vitest against local Supabase (requires supabase start)
+npm run test:integration  # Vitest against local Supabase (requires supabase start + Docker)
 npm run test:e2e          # Playwright
 npm run lint
 npm run build             # must pass with zero TypeScript and lint errors
 ```
 
 **Never skip a failing test** (§22.1). Integration tests seed users of each role and assert
-permissions **as the restricted role, never as OWNER** (§23).
+permissions **as the restricted role, never as OWNER** (§23). The RLS suite is the most important
+suite in the project and **runs on every commit**, not locally only (M-20).
+
+The lint step also enforces §18's **no-cross-feature-import** rule (M-30). A feature folder may
+import from `services`, `lib`, `components/ui` and `components/shared` — never from another
+feature folder.
 
 ---
 
-## 7. Two environment traps
+## 7. Four environment traps
 
-### Timezone
-`TZ=Asia/Kolkata` sets the **Node** timezone. The local Postgres session timezone stays **UTC**, so
-`current_date` in SQL is a day behind IST between 00:00 and 05:30 IST. Every date expression in SQL
-must be written `(now() at time zone 'Asia/Kolkata')::date`. Do not "fix" this by changing the
-database timezone — timestamps are stored UTC by design (§8.11, `/docs/SPEC_AUDIT.md` **B-10**).
+### Timezone — the business day is not the session day
 
-### Service-role key
+`TZ=Asia/Kolkata` sets the **Node** timezone. The local Postgres session timezone stays **UTC**,
+so bare `current_date` in SQL is a day behind IST between 00:00 and 05:30 IST. **Every
+business-day expression in SQL must be written `(now() at time zone 'Asia/Kolkata')::date`**, and
+`lib/dates.ts` must behave identically (B-10). Do not "fix" this by changing the database
+timezone — timestamps are stored UTC by design (§8.11).
+
+Rendering uses **`Intl.DateTimeFormat` with `timeZone: 'Asia/Kolkata'`**. `date-fns-tz` is **not**
+installed and must not be (M-13).
+
+### Service-role key — three callers, no more
+
 `lib/supabase/admin.ts` throws if `typeof window !== 'undefined'`. If you hit that error, you have
-imported the admin client into something that ships to the browser. Fix the import — do not remove
-the guard (§15.7).
+imported the admin client into something that ships to the browser. **Fix the import — do not
+remove the guard** (§15.7).
+
+Permitted callers: **cron routes**, **the import executor**, and **the user-provisioning Server
+Action** (ADR-009). The provisioning action performs its OWNER/ADMIN check **before** touching the
+admin client; reversing that order is a privilege-escalation hole.
+
+### Settings values are never literals
+
+All twelve `TODO-BD` items are resolved, but **resolution fixed the values, not the mechanism**.
+Every threshold is still read through `settings.service.ts` from `system_settings`. In particular
+`30000000` — the approved high-value threshold (TODO-BD-02) — must never appear as a literal in
+application code, a default parameter, or a test fixture the application reads.
+
+Note the split: **`account_dormancy_days`** and **`opportunity_dormancy_days`** are separate keys
+(ADR-010). `dormancy_days` does not exist.
+
+Two keys are **operational state, not configuration**: `maintenance_consecutive_failures` and
+`maintenance_last_failure_at` (ADR-014). The maintenance cron route is their only writer, and they
+must not appear as editable rows at `/settings`.
+
+### Deletes
+
+Exactly one table in the schema accepts a `DELETE`: `project_stakeholders` (ADR-004), because its
+rows are relationship links rather than business records. If you find yourself needing a second
+DELETE policy, the flow is wrong — raise it.
+
+### Geography — `cities` holds taluks, not cities
+
+`system_settings.cities` holds the **ten Erode District revenue taluks**: Erode, Perundurai,
+Modakkurichi, Kodumudi, Gobichettipalayam, Sathyamangalam, Bhavani, Anthiyur, Thalavadi, Nambiyur.
+The key is named `cities` because §5.10 names it so; it is not renamed.
+
+**Chennimalai is not a taluk** — it is a development block and firka within Perundurai taluk, and
+belongs in `accounts.area` / `projects.area`, which are **free text** in V1. Lower geographic
+units are not enumerated. **Do not invent geographic units** (TODO-BD-06).
 
 ---
 
@@ -129,11 +199,16 @@ the guard (§15.7).
 
 | File | Runs where | Contains |
 |---|---|---|
-| `/supabase/seed/seed.sql` | all environments | OWNER user, `system_settings` rows |
+| `/supabase/seed/seed.sql` | all environments | OWNER user, **the system user (ADR-003, `is_active = false`)**, `system_settings` rows |
 | `/supabase/seed/dev-fixtures.sql` | **development only** | Sample accounts, projects, opportunities, activities |
+| *(performance fixture)* | development/CI only | 20,000 opportunities for the §23.6 gate (M-18) |
 
 **Fixtures never run against staging or production.** A demo built on fixtures is not a working
 feature (`CLAUDE.md` §15).
+
+The seeded `system_settings` values are the approved ones — see `/docs/DATABASE.md`. Note that
+`cities` is seeded with the **Erode District** taluk list (TODO-BD-06); the exact enumeration is
+still to be confirmed and is a §23.9 launch gate.
 
 ---
 
@@ -141,6 +216,9 @@ feature (`CLAUDE.md` §15).
 
 1. Read `CLAUDE_CODE_BUILD_SPEC.md` end to end. It is the source of truth.
 2. Read `CLAUDE.md` — the engineering rules for this repository.
-3. Read `/docs/IMPLEMENTATION_PLAN.md` for the current phase and its blockers.
-4. Read `/docs/SPEC_AUDIT.md` for the open defects affecting that phase.
-5. Check `/docs/DECISIONS.md` — **never resolve a `TODO-BD` by choosing a value in code.**
+3. Read `/docs/IMPLEMENTATION_PLAN.md` for the current phase — and check that the
+   **Decision Gate** has passed before touching migrations or provisioning.
+4. Read `/docs/SPEC_AUDIT.md` for the resolutions affecting that phase. **All 53 findings are
+   resolved**; the audit is now a reference for *why* things are built the way they are.
+5. Read `/docs/DECISIONS.md` — the twelve resolved `TODO-BD` values, the fourteen ADRs, and the
+   five product decisions C-1 … C-5. **A resolved decision is still never hard-coded.**

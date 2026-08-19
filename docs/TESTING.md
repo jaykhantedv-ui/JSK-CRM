@@ -55,8 +55,11 @@ Run against `supabase start` with seeded users of each role.
 - Salesperson **can** read an account they do not own when they own an opportunity on it — and
   that account's contacts and projects by the same route.
 - Salesperson cannot change `owner_id` — by table UPDATE, by PostgREST, or through the RPC.
-- ADMIN cannot reassign; MANAGER and OWNER can (`/docs/SPEC_AUDIT.md` H-05).
-- **No role can DELETE from any business table**, including `users` (H-06).
+- ADMIN cannot reassign; MANAGER and OWNER can (H-05, via `can_reassign()`).
+- **ADMIN cannot export** through the Server Action, not merely through a hidden button (C-2).
+- **No role can DELETE from any business table**, including `users` (H-06) — asserted table by
+  table. **`project_stakeholders` is the single approved exception** (ADR-004) and must *succeed*;
+  all ten other tables must *fail*, for every role.
 - A salesperson cannot escalate their own role via a profile update.
 - Archived records are excluded from active queries and included in archive queries for
   authorised roles.
@@ -89,8 +92,9 @@ Run against `supabase start` with seeded users of each role.
 14. CSV import detects duplicates and honours per-row decisions
 15. The full mobile workflow at **375×812 completes in under 60 seconds**
 
-**All fifteen must pass** (§23.8). Scenario 9's "404" and §12.6's Forbidden state contradict each
-other — decide before writing it (`/docs/SPEC_AUDIT.md` M-03).
+**All fifteen must pass** (§23.8). Scenario 9 asserts **404 / not-found** — resolved (M-03):
+unauthorised record access never confirms the record exists. §12.6's "Forbidden" state is reserved
+for route-level denial where no record identity is revealed.
 
 ---
 
@@ -98,6 +102,10 @@ other — decide before writing it (`/docs/SPEC_AUDIT.md` M-03).
 
 - Direct PostgREST calls with salesperson credentials attempting cross-user reads
 - Role escalation via profile update
+- **Login rate limiting** (C-5): repeated failed logins throttle, the provider error maps to
+  `AppError`, and the message leaks no implementation detail — no retry-after internal, no hint of
+  which credential was wrong
+- **The user-provisioning action rejects a salesperson before touching the admin client** (ADR-009)
 - **Service-role key absent from the client bundle — verified by grepping the build output**
 - Storage object access without visibility of the parent entity
 - Unauthenticated access to every route
@@ -119,9 +127,8 @@ other — decide before writing it (`/docs/SPEC_AUDIT.md` M-03).
 | Build | `npm run build` with **zero** TypeScript and lint errors | §23.9 |
 | Vocabulary | the word **"revenue" appears nowhere** in the UI | §2.4, §23.6 |
 
-The 20,000-opportunity fixture and the measurement method are not specified anywhere in the spec
-(`/docs/SPEC_AUDIT.md` M-18), and integration tests need Docker in CI (M-20). Both need decisions
-before Phase 19.
+The 20,000-opportunity performance fixture (M-18) and the Supabase/Docker CI strategy (M-20) are
+both approved and are built in Phase 19. The RLS suite runs **on every commit**, not locally only.
 
 ---
 
@@ -180,18 +187,21 @@ Templates download; invalid rows report row number and specific reason · in-fil
 ERROR, against-database duplicates require a decision · imported records carry `is_imported`,
 `import_batch_id`, `legacy_ref` · **import fires no notifications** · rollback within 7 days
 archives everything from the batch and refuses if records were edited · merge requires
-confirmation, preserves all activities, and is recorded in the audit trail *(blocked by H-02)*.
+confirmation, preserves all activities, and records source/target in `opportunity_events.metadata`
+per moved opportunity. **Merge is not reversible in V1** (ADR-008) — the UI must warn so before
+confirmation, and no document or screen may claim otherwise.
 
 ### §23.8 Security
 All fifteen E2E scenarios pass · salesperson cannot read/write another's records through a **direct
 PostgREST call** · role escalation via self-update is rejected · **no role can DELETE from any
-business table** · service-role key absent from the client bundle (verified by grep of the build) ·
+business table** (ADR-004's `project_stakeholders` link row is the single documented exception) · service-role key absent from the client bundle (verified by grep of the build) ·
 Storage objects unreadable without entity visibility · **no database error text ever reaches the
 user**.
 
 ### §23.9 Launch readiness
-Migrations apply cleanly to an empty database · seed produces a working OWNER login ·
-`system_settings.cities` populated (**TODO-BD-06**) · backup and restore procedure documented
+Migrations apply cleanly to an empty database · seed produces a working OWNER login and the
+ADR-003 system user · `system_settings.cities` populated with the **ten Erode District revenue
+taluks** (**TODO-BD-06**; Chennimalai is a block/firka under Perundurai and belongs in `area`) · backup and restore procedure documented
 **and tested once** · all nine `/docs` files reflect the built system · `npm run build` passes with
 zero TypeScript and lint errors · mobile create-customer flow completes in under 60 seconds on a
 real Android device.

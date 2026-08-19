@@ -31,19 +31,25 @@ An assumption that is not written down is a defect. If you must proceed to avoid
 unrelated work, implement the *mechanism*, leave the *value* configurable, and flag it in the
 phase summary as an open item — never bury it in code.
 
-## 3. `TODO-BD` items are never resolved in code
+## 3. `TODO-BD` values are never hard-coded — even now that they are decided
 
-The spec marks twelve unresolved business decisions `TODO-BD-01` … `TODO-BD-12` (§24), all
-listed in `/docs/DECISIONS.md`.
+The spec marks twelve business decisions `TODO-BD-01` … `TODO-BD-12` (§24). **All twelve were
+resolved by the Project Owner on 2026-08-19** and are recorded in `/docs/DECISIONS.md` §A.
 
-- **Never hard-code a value for a `TODO-BD`.** Not in a constant, not in a default parameter,
-  not in a migration literal outside the `system_settings` seed, not in a test fixture that
-  the application reads.
-- Implement the **mechanism**; read the **placeholder** from `system_settings` through the
-  cached settings helper (`services/settings.service.ts`).
-- Settings keys that exist today: `cities`, `stage_probabilities`, `high_value_threshold_paise`,
-  `dormancy_days`, `stage_stall_days`, `new_enquiry_sla_hours`, `owner_summary_schedule`,
-  `material_types` (§5.10). Reading any of these from a literal in application code is a bug.
+**Resolution fixed the values. It did not licence a constant.**
+
+- **Never hard-code a `TODO-BD` value.** Not in a constant, not in a default parameter, not in a
+  migration literal outside the `system_settings` seed, not in a test fixture the application
+  reads. `30000000` — the approved high-value threshold — must appear in exactly one place.
+- Implement the **mechanism**; read the value from `system_settings` through the cached settings
+  helper (`services/settings.service.ts`), which is the **only** reader.
+- Settings keys: `cities` (the ten Erode District **revenue taluks**), `stage_probabilities`,
+  `high_value_threshold_paise` (`30000000`), **`account_dormancy_days`**,
+  **`opportunity_dormancy_days`**, `stage_stall_days`, `new_enquiry_sla_hours`,
+  `owner_summary_schedule`, `material_types`, plus two operational-state keys written only by the
+  maintenance cron — **`maintenance_consecutive_failures`**, **`maintenance_last_failure_at`**
+  (§5.10 + ADR-010, ADR-014). **`dormancy_days` is retired** and must never be seeded.
+- Reading any of these from a literal in application code is a bug.
 - If a new threshold is needed, it is a new `system_settings` key plus a `/docs/DECISIONS.md`
   entry — not a constant.
 
@@ -73,8 +79,10 @@ Constraints are the backbone of data quality. A service-layer bug must not be ab
 invalid data. These live in the schema and must never be relaxed to make code easier:
 
 - `won_requires_value` · `won_requires_closed` · `lost_requires_reason` · `lost_requires_closed`
-- `quoted_requires_quotation` · `next_action_pairing` · `nurture_needs_date` (§5.7)
-- `contact_reachable` on `contacts`, `stakeholder_target` on `project_stakeholders`
+- `quoted_requires_quotation` — binding on **`quoted` only**, never `negotiation` or
+  `verbal_confirmation` (ADR-006) · `next_action_pairing` · `nurture_needs_date` (§5.7)
+- `contact_reachable` on `contacts`, **`account_reachable` on `accounts`** (ADR-013),
+  `stakeholder_target` on `project_stakeholders`
 - `one_primary_per_project` partial unique index (§5.6)
 - `log_opportunity_event()` trigger on `opportunities` (§5.9)
 
@@ -87,7 +95,10 @@ Derived values are **computed in queries, never stored**: `is_overdue`, `days_in
 ## 6. RLS is the authorization boundary
 
 - Every table has RLS enabled with explicit `SELECT` / `INSERT` / `UPDATE` policies (§15.2).
-- **No `DELETE` policy on any table for any role.** Nobody hard-deletes anything, ever.
+- **No `DELETE` policy on any table for any role**, with exactly one approved exception:
+  `project_stakeholders` (ADR-004), whose rows are relationship links rather than business
+  records. A reviewer should be able to grep for `for delete` and find **one** policy. A second
+  one means the flow is wrong — raise it.
 - Frontend filtering is **not** a control. A hidden button is **not** a control. Every
   permission must hold against a direct PostgREST call with a salesperson's JWT.
 - Role lookups inside policies go through the `SECURITY DEFINER` helpers in §15.1
@@ -103,12 +114,14 @@ Derived values are **computed in queries, never stored**: `is_overdue`, `days_in
 - Reads: Server Components using the `@supabase/ssr` server client with the user's session.
 - Writes: **Server Actions → services**. No `supabase.from(...).insert()` in a Client Component.
 - The only permitted browser-side Supabase call that writes is a **Storage upload against a
-  server-issued signed upload URL** (the file exceeds the platform request-body limit, see
-  `/docs/SPEC_AUDIT.md` B-09). The database row that references the file is still written by a
-  Server Action. This carve-out is explicit and applies to nothing else.
+  server-issued signed upload URL** — approved as **ADR-005**, because a 10 MB file (§15.6)
+  exceeds the platform request-body limit. The URL is short-lived and is issued only after a
+  server-side check that the caller can see the parent entity. The database row that references
+  the file is still written by a Server Action. **This carve-out applies to nothing else.**
 - The **service-role key never enters a client bundle**. `lib/supabase/admin.ts` throws if
-  `typeof window !== 'undefined'`. Its use is limited to cron routes, the import executor, and
-  user provisioning (§15.7 plus the exception recorded in `/docs/SPEC_AUDIT.md` H-07).
+  `typeof window !== 'undefined'`. It has exactly three callers: cron routes, the import
+  executor, and the user-provisioning Server Action — the last only **after** a server-side
+  OWNER/ADMIN check (§15.7 + **ADR-009**). Reversing that order is a privilege-escalation hole.
   A build-output grep for the key is part of the security suite (§19.4).
 
 ## 8. Business logic belongs in services
@@ -172,7 +185,13 @@ Derived values are **computed in queries, never stored**: `is_overdue`, `days_in
 - **No `UPDATE` and no `DELETE` policy for any role, including OWNER.** Historical stage changes
   are never deleted or rewritten (§9.2).
 - Stage transitions are validated against the constant map in `lib/opportunity/transitions.ts`
-  and rejected with `INVALID_TRANSITION`. Backward moves require a `reason` on the event row.
+  and rejected with `INVALID_TRANSITION`. Backward moves require a `reason`, which reaches the
+  event row through the transaction-local `app.event_reason` GUC (**ADR-001**) — the trigger stays
+  the single writer.
+- The matrix carries one approved addition: **`won → qualified`**, reopen-only, MANAGER/OWNER-only
+  (**ADR-007**). Reopening clears `final_order_value` and `closed_at`, preserves the historical
+  `WON` event, and **does not change `accounts.status`** — the account may hold other won
+  opportunities.
 - `activities` and `opportunity_events` are deliberately separate and must not be merged.
 
 ## 14. No fake integrations
@@ -208,9 +227,15 @@ Resend · Vercel Cron · Vitest + Playwright.
   reason, recorded **before** it is installed (§17.1).
 - Prefer the platform: shadcn components are owned in-repo and edited, not wrapped in a new
   abstraction library. `Intl` before a formatting package.
-- Two known gaps already need a decision rather than a silent `npm install`: UTC→Asia/Kolkata
-  rendering (`date-fns-tz` vs `Intl.DateTimeFormat`) and magic-byte MIME verification. See
-  `/docs/SPEC_AUDIT.md` M-13 and M-14.
+- Two gaps were closed on 2026-08-19 **without** adding a dependency: UTC→Asia/Kolkata rendering
+  uses **`Intl.DateTimeFormat`** (`date-fns-tz` is **not** installed, M-13), and magic-byte MIME
+  verification is a **hand-rolled signature check** for the four allowed types — JPEG, PNG, WebP,
+  PDF (`file-type` is **not** installed, M-14).
+- One dev-dependency addition is approved: an **ESLint import-boundary rule**
+  (`import/no-restricted-paths` or equivalent) enforcing §18's no-cross-feature-import rule
+  (M-30). It ships nothing to the browser.
+- Login rate limiting uses **Supabase Auth's built-in** limits — **no Redis**, no distributed
+  rate-limiting infrastructure (C-5).
 
 ## 17. No architecture changes without explicit approval
 

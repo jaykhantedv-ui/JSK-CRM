@@ -1,8 +1,9 @@
 # Product Requirements
 
 Derived from `CLAUDE_CODE_BUILD_SPEC.md` §1–§4, §7–§13, §20, §23. **Nothing here is invented.**
-Where the specification is ambiguous, this document says so and points at `/docs/SPEC_AUDIT.md`
-rather than choosing.
+Where the specification was ambiguous, this document points at the recorded resolution.
+**All 53 audit findings and all 12 `TODO-BD` decisions were closed on 2026-08-19** — see
+`/docs/DECISIONS.md` and `/docs/SPEC_AUDIT.md`.
 
 ---
 
@@ -82,6 +83,11 @@ salesperson-entered estimates, not accounting figures.
 | **Won Value** | Sum of `final_order_value` on won opportunities |
 | **Weighted Pipeline** | Pipeline value × stage probability |
 
+The launch geography is **Erode District, Tamil Nadu** — its ten revenue taluks (Erode,
+Perundurai, Modakkurichi, Kodumudi, Gobichettipalayam, Sathyamangalam, Bhavani, Anthiyur,
+Thalavadi, Nambiyur) in `system_settings.cities`. Lower units such as Chennimalai — a development
+block and firka within Perundurai taluk — belong in `area`, which stays free text (TODO-BD-06).
+
 ---
 
 ## 4. Domain model in business terms
@@ -142,8 +148,8 @@ surfaces the opportunity in the Missing Next Action exception list.
 > action is unknown. **Blocking causes fabricated dates, which is worse than a visible gap.** The
 > exception list is the control.
 
-*(§11.1 marks next action as required in the primary create flow, which contradicts this —
-`/docs/SPEC_AUDIT.md` M-04.)*
+*(§11.1's asterisks on next action are stale relative to §25.3, which is binding and states
+"strongly prompted, not enforced". Next action is never hard-blocking — M-04.)*
 
 ### Quotations (§8.6)
 
@@ -161,7 +167,16 @@ counted as a data-quality metric.
 
 Archived records disappear from active lists and dashboards, remain readable and searchable by
 MANAGER/OWNER/ADMIN, retain all relationships and activities, contribute nothing to pipeline
-value, and can be restored. **No role can hard delete anything, ever.**
+value, and can be restored.
+
+Archiving an account is a **four-step controlled operation** (C-3): preview the complete set of
+affected child records → clearly display what will be archived → require explicit confirmation →
+archive the account and its children as one operation. **The preview is informational; individual
+children do not require separate opt-ins.** Activities and opportunity events are history and are
+never archived.
+
+**No role can hard delete anything**, with one narrow exception: a `project_stakeholders` link row
+may be removed, because it records a relationship rather than a business record (ADR-004).
 
 ### Duplicate detection — advisory, never automatic (§8.9)
 
@@ -174,7 +189,8 @@ value, and can be restored. **No role can hard delete anything, ever.**
 | Neither | NONE | Save silently |
 
 **Never merge automatically. Never block creation outright.** Merging is a manual MANAGER/OWNER
-action, always with a preview. Phone numbers are deliberately **not unique** — two family members
+action, always with a preview — and in V1 it is **not reversible**, so the UI must say so before
+confirmation (ADR-008). Phone numbers are deliberately **not unique** — two family members
 legitimately share a number, and a hard block causes salespeople to enter fake numbers (§25.2).
 
 ### Activity immutability (§8.10)
@@ -215,9 +231,11 @@ final; a mistaken win is corrected by MANAGER/OWNER through an explicit reopen t
 — **there is no silent edit**. Skipping stages forward is allowed, because real sales skip stages.
 **Historical stage changes are never deleted or rewritten.**
 
-*(Two lifecycle contradictions are unresolved: `selection → negotiation` is matrix-legal but
-constraint-illegal, and reopening from `won` contradicts `won → (none)` —
-`/docs/SPEC_AUDIT.md` H-10, H-11.)*
+*(Two lifecycle contradictions were resolved on 2026-08-19: **quotation fields are required only
+when entering `quoted`**, so `selection → negotiation` is legal with no quotation data (ADR-006);
+and a mistaken win reopens as **`won → qualified`**, clearing `final_order_value` and `closed_at`
+while preserving the historical `WON` event and **leaving `accounts.status` unchanged** —
+ADR-007.)*
 
 ---
 
@@ -257,8 +275,9 @@ afterwards.
 `/opportunities/board` (desktop ≥1024px only) · `/opportunities/:id` · `/team` · `/team/:userId` ·
 `/reports` · `/import` · `/settings` · `/settings/users` · `/archive` · `/search?q=`
 
-*(Several creation/edit routes implied by the flows are absent from the route map —
-`/docs/SPEC_AUDIT.md` M-11.)*
+Four routes the flows require are added under **C-4**: `/opportunities/new` · `/contacts/new` ·
+`/projects/:id/edit` · `/opportunities/:id/edit`. **Account tabs use `/accounts/:id` with URL/query
+state** (`?tab=projects`) rather than nested routes.
 
 ### Navigation (§12.3)
 
