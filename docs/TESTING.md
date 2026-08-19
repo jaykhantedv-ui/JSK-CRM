@@ -16,17 +16,38 @@ to make a phase pass** (§22.1 step 8).
 
 Do not chase a coverage percentage. The gate is **the fifteen E2E scenarios plus the RLS suite**.
 
-### Current state — Master Phase 1
+### Current state — Master Phase 2 (Core CRM)
 
 | Suite | Count | Status |
 |---|---|---|
-| Unit (Vitest) | 232 | passing |
-| Integration + RLS (Vitest + PostgreSQL) | 154 | passing |
-| E2E smoke (Playwright) | 8 | passing |
+| Unit (Vitest) | 282 | passing |
+| Integration + RLS (Vitest + PostgreSQL) | 239 | passing |
+| E2E (Playwright) | 21 passing, 12 skipped — see below | passing |
 | `tsc --noEmit` | — | clean |
 | ESLint | — | clean |
 | `next build` | — | clean |
 | Service-role key absent from the bundle | — | verified |
+
+Master Phase 1 finished at 232 unit and 154 integration. Phase 2 adds 50 unit and 85
+integration tests, across four new files:
+
+| File | Covers |
+|---|---|
+| `tests/unit/duplicates.test.ts` | §8.9 confidence scoring; that no copy ever says "blocked" |
+| `tests/unit/next-action.test.ts` | §8.3/§10.3 follow-up state, including the evening and pre-dawn IST boundaries |
+| `tests/unit/opportunity-title.test.ts` | §8.4 title generation; §12.8 pagination against hostile URL params |
+| `tests/integration/crm-workflows.test.ts` | §11.1 create flow, §9.3 stage side effects, next actions, ADR-020 triggers, many-opportunities-per-project |
+| `tests/integration/crm-permissions.test.ts` | outlet scope, assignment, search scoping, SQL-injection through search, stakeholders, the 24-hour activity window, the immutable audit trail |
+| `tests/integration/service-contracts.test.ts` | that every column and RPC the services name actually exists, with the right grants and `SECURITY INVOKER` |
+
+### Why `service-contracts.test.ts` exists
+
+Services reach the database through PostgREST, which cannot run here (ADR-018), so the query
+strings in `src/services/*` cannot be executed end to end. A typo inside one of those strings is
+invisible to the type checker. That file checks everything the queries depend on — column
+existence, RPC arity and security mode, single-FK embeds, execute grants, `security_invoker` on
+the view — so the remaining untested surface is PostgREST's own request handling rather than our
+use of it. It is not a substitute for a run against a real project, and is not described as one.
 
 ### Where the tests run (ADR-018)
 
@@ -50,6 +71,21 @@ refuse a real request refuses the test, with the same error code.
 **What cannot be tested here, and is not claimed to be:** Supabase Auth itself — password hashing,
 JWT issue, the built-in login rate limiting of C-5 — Storage buckets and their policies (§15.6),
 and PostgREST's own request handling. Those need a real Supabase project in `ap-south-1`.
+
+### The skipped E2E scenarios
+
+Twelve of the Phase 2 Playwright specs need a signed-in session, and signing in needs Supabase
+Auth (GoTrue), which this environment cannot reach. They are written against the real application
+and **skip with a stated reason** rather than being deleted or weakened; set
+`E2E_SUPABASE_READY=1` with real credentials and they run as written.
+
+They are not the only coverage of those workflows. Each is also proved at the database level in
+`crm-workflows.test.ts` and `crm-permissions.test.ts`, which run for real on every commit and are
+where the authorization rules are actually verified (§19.2). What E2E adds beyond them is
+browser-level: the sixty-second mobile flow at 375×812, and direct-URL access checks.
+
+The 21 specs that **do** run here need no session and cover §19.4's "unauthenticated access to
+every route" for all twelve Core CRM routes.
 
 ---
 

@@ -25,6 +25,14 @@ export type LostReason = Enums['lost_reason']
 export type OpportunityEventType = Enums['opportunity_event_type']
 export type StakeholderRole = Enums['stakeholder_role']
 export type InfluenceLevel = Enums['influence_level']
+export type ProjectType = Enums['project_type']
+export type ProjectStatus = Enums['project_status']
+export type ConstructionStage = Enums['construction_stage']
+export type ActivityPurpose = Enums['activity_purpose']
+export type ActivityOutcome = Enums['activity_outcome']
+export type QuotationStatus = Enums['quotation_status']
+export type QuantityUnit = Enums['quantity_unit']
+export type ContactChannel = Enums['contact_channel']
 
 export type UserRow = TableRow<'users'>
 export type OutletRow = TableRow<'outlets'>
@@ -42,6 +50,19 @@ export type ImportRowRow = TableRow<'import_rows'>
 
 /** `v_opportunity_flags` (§10.3) — the derived accountability states. */
 export type OpportunityFlagsRow = Public['Views']['v_opportunity_flags']['Row']
+
+/**
+ * A stakeholder row with the person or company it points at, resolved.
+ *
+ * Lives here rather than beside the service that builds it because the panel
+ * that renders it is a Client Component. A type-only import is erased at build
+ * time and leaks nothing, but keeping the type here means no client module has a
+ * reason to name a service module at all (CLAUDE.md §7).
+ */
+export type StakeholderWithTarget = ProjectStakeholderRow & {
+  contact: Pick<ContactRow, 'id' | 'full_name' | 'phone' | 'email'> | null
+  account: { id: string; name: string; phone: string | null } | null
+}
 
 /**
  * A user with their outlet scope resolved. This is what services and Server

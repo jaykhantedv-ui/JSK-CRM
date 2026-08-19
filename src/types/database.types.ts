@@ -1280,19 +1280,227 @@ export type Database = {
       }
     }
     Functions: {
+      bulk_reassign: {
+        Args: { p_from_user: string; p_reason: string; p_to_user: string }
+        Returns: number
+      }
       can_read_account: { Args: { a: string }; Returns: boolean }
       can_read_opportunity: { Args: { o: string }; Returns: boolean }
       can_read_project: { Args: { p: string }; Returns: boolean }
       can_write_project: { Args: { p: string }; Returns: boolean }
+      change_opportunity_stage: {
+        Args: {
+          p_competitor?: string
+          p_final_order_value?: number
+          p_lost_detail?: string
+          p_lost_reason?: Database["public"]["Enums"]["lost_reason"]
+          p_next_action?: Database["public"]["Enums"]["next_action_type"]
+          p_next_action_date?: string
+          p_next_action_note?: string
+          p_opportunity_id: string
+          p_order_reference?: string
+          p_quotation_date?: string
+          p_quotation_ref?: string
+          p_quoted_value?: number
+          p_reason?: string
+          p_to_stage: Database["public"]["Enums"]["opportunity_stage"]
+        }
+        Returns: {
+          account_id: string
+          archived_at: string | null
+          archived_by: string | null
+          category: Database["public"]["Enums"]["product_category"]
+          closed_at: string | null
+          competitor: string | null
+          created_at: string
+          created_by: string | null
+          estimated_quantity: number | null
+          estimated_value: number
+          expected_close_date: string | null
+          final_order_value: number | null
+          id: string
+          import_batch_id: string | null
+          is_imported: boolean
+          last_activity_at: string | null
+          legacy_ref: string | null
+          lost_detail: string | null
+          lost_reason: Database["public"]["Enums"]["lost_reason"] | null
+          material_notes: string | null
+          next_action: Database["public"]["Enums"]["next_action_type"] | null
+          next_action_date: string | null
+          next_action_note: string | null
+          order_reference: string | null
+          outlet_id: string
+          owner_id: string | null
+          project_id: string | null
+          quantity_unit: Database["public"]["Enums"]["quantity_unit"] | null
+          quotation_date: string | null
+          quotation_ref: string | null
+          quotation_status: Database["public"]["Enums"]["quotation_status"]
+          quotation_valid_until: string | null
+          quoted_value: number | null
+          sla_notified_at: string | null
+          source: Database["public"]["Enums"]["lead_source"]
+          stage: Database["public"]["Enums"]["opportunity_stage"]
+          stage_changed_at: string
+          title: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "opportunities"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      create_account_with_opportunity: {
+        Args: {
+          p_account_type: Database["public"]["Enums"]["account_type"]
+          p_address?: string
+          p_area?: string
+          p_category: Database["public"]["Enums"]["product_category"]
+          p_city?: string
+          p_email?: string
+          p_estimated_value: number
+          p_expected_close_date?: string
+          p_material_notes?: string
+          p_name: string
+          p_next_action?: Database["public"]["Enums"]["next_action_type"]
+          p_next_action_date?: string
+          p_next_action_note?: string
+          p_notes?: string
+          p_outlet_id: string
+          p_phone?: string
+          p_project_id?: string
+          p_source?: Database["public"]["Enums"]["lead_source"]
+          p_title: string
+        }
+        Returns: {
+          account_id: string
+          activity_id: string
+          opportunity_id: string
+        }[]
+      }
       current_user_id: { Args: never; Returns: string }
+      find_account_duplicates: {
+        Args: {
+          p_city?: string
+          p_email?: string
+          p_exclude_id?: string
+          p_limit?: number
+          p_name?: string
+          p_name_city_threshold: number
+          p_name_only_threshold: number
+          p_phone?: string
+        }
+        Returns: {
+          account_type: Database["public"]["Enums"]["account_type"]
+          city: string
+          email: string
+          id: string
+          name: string
+          name_similarity: number
+          owner_id: string
+          phone: string
+          signal: string
+          status: Database["public"]["Enums"]["account_status"]
+        }[]
+      }
       is_manager_or_above: { Args: never; Returns: boolean }
       is_owner: { Args: never; Returns: boolean }
       is_owner_or_admin: { Args: never; Returns: boolean }
+      like_escape: { Args: { raw: string }; Returns: string }
+      log_activity: {
+        Args: {
+          p_account_id: string
+          p_clear_next_action?: boolean
+          p_contact_id?: string
+          p_duration_minutes?: number
+          p_location_note?: string
+          p_measurements?: string
+          p_next_action?: Database["public"]["Enums"]["next_action_type"]
+          p_next_action_date?: string
+          p_next_action_note?: string
+          p_occurred_at?: string
+          p_opportunity_id?: string
+          p_outcome?: Database["public"]["Enums"]["activity_outcome"]
+          p_project_id?: string
+          p_purpose?: Database["public"]["Enums"]["activity_purpose"]
+          p_summary: string
+          p_type: Database["public"]["Enums"]["activity_type"]
+        }
+        Returns: {
+          activity_id: string
+          opportunity_id: string
+        }[]
+      }
       manages_outlet: { Args: { p_outlet: string }; Returns: boolean }
       manages_user: { Args: { p_user: string }; Returns: boolean }
       normalize_phone: { Args: { raw: string }; Returns: string }
       owns_opportunity_on_account: { Args: { a: string }; Returns: boolean }
       owns_opportunity_on_project: { Args: { p: string }; Returns: boolean }
+      raise_not_found: { Args: never; Returns: undefined }
+      reassign_opportunity: {
+        Args: { p_opportunity_id: string; p_reason: string; p_to_user: string }
+        Returns: {
+          account_id: string
+          archived_at: string | null
+          archived_by: string | null
+          category: Database["public"]["Enums"]["product_category"]
+          closed_at: string | null
+          competitor: string | null
+          created_at: string
+          created_by: string | null
+          estimated_quantity: number | null
+          estimated_value: number
+          expected_close_date: string | null
+          final_order_value: number | null
+          id: string
+          import_batch_id: string | null
+          is_imported: boolean
+          last_activity_at: string | null
+          legacy_ref: string | null
+          lost_detail: string | null
+          lost_reason: Database["public"]["Enums"]["lost_reason"] | null
+          material_notes: string | null
+          next_action: Database["public"]["Enums"]["next_action_type"] | null
+          next_action_date: string | null
+          next_action_note: string | null
+          order_reference: string | null
+          outlet_id: string
+          owner_id: string | null
+          project_id: string | null
+          quantity_unit: Database["public"]["Enums"]["quantity_unit"] | null
+          quotation_date: string | null
+          quotation_ref: string | null
+          quotation_status: Database["public"]["Enums"]["quotation_status"]
+          quotation_valid_until: string | null
+          quoted_value: number | null
+          sla_notified_at: string | null
+          source: Database["public"]["Enums"]["lead_source"]
+          stage: Database["public"]["Enums"]["opportunity_stage"]
+          stage_changed_at: string
+          title: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "opportunities"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      search_crm: {
+        Args: { p_limit?: number; p_query: string }
+        Returns: {
+          entity: string
+          id: string
+          rank: number
+          score: number
+          subtitle: string
+          title: string
+        }[]
+      }
       system_user_id: { Args: never; Returns: string }
       user_role: {
         Args: never

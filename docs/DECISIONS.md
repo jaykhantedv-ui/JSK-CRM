@@ -1078,6 +1078,77 @@ permission positions, not defects.
   the platform's configured limits, so those limits are recorded in `/docs/DEPLOYMENT.md` once the
   projects are provisioned.
 
+### ADR-020 — Three denormalised columns are maintained by database triggers, not by services
+
+**Status:** Accepted
+**Date:** 2026-08-19   **Decided by:** Engineering, during Master Phase 2
+
+**Context.** Three values the specification stores rather than derives —
+`opportunities.stage_changed_at` (§5.7), `accounts.last_activity_at` /
+`opportunities.last_activity_at` (§5.3, §5.7), and `accounts.status = 'ACTIVE'` on a win (§8.7) —
+were left to "the service writes it". Building the activity flow exposed that this cannot work.
+
+A salesperson may log an activity against an account they do **not** own, on the strength of
+owning an opportunity attached to it — the work-context rule of §3.2, expressed in the
+`activities_insert` policy as `can_read_account(account_id)`. But `accounts_update` requires
+ownership or outlet management. So a service-layer `update accounts set last_activity_at = …`
+issued by that same salesperson matches **zero rows** and silently succeeds. Recency on the
+Customer 360 header, and every dormancy query built on it, would quietly stop moving for exactly
+the collaborative accounts where activity matters most. The same reasoning applies to promoting
+an account to `ACTIVE` when a work-context opportunity is won.
+
+`stage_changed_at` fails differently: `opportunities_update` permits a manager to change `stage`
+through a direct PostgREST call, which leaves the clock reading the old value, so `days_in_stage`
+under-reports and a stalled opportunity looks fresh.
+
+**Decision.** Migration 018 moves all three into triggers:
+
+- `touch_stage_changed_at()` — BEFORE UPDATE, plain SECURITY INVOKER; it only writes to the row
+  already being updated.
+- `touch_last_activity_at()` — AFTER INSERT on `activities`, SECURITY DEFINER, using
+  `greatest(...)` so a back-dated activity never makes an account look staler than it is.
+- `apply_won_account_status()` — AFTER UPDATE on `opportunities`, SECURITY DEFINER, promoting
+  `PROSPECT → ACTIVE` only. Deliberately one-directional: reopening a won opportunity (ADR-007)
+  does not demote the account, because it may hold other won opportunities and a customer who has
+  bought once has bought. `DORMANT` and `DO_NOT_CONTACT` are left alone — a sale does not overrule
+  an instruction not to contact somebody.
+
+**Consequences.** The two SECURITY DEFINER triggers run with the table owner's rights, which is
+the same mechanism `log_opportunity_event()` (§5.9) and `handle_new_auth_user()` (ADR-009) already
+rely on. They are a *system consequence of a write the caller was already authorized to make*, not
+a new privilege: each fires only from an insert or update that RLS had to permit first. They add
+no callable surface — `EXECUTE` is revoked from `public` and `anon`, and an integration test
+asserts that neither `authenticated` nor `anon` can invoke any of them directly.
+
+The services become simpler and, more importantly, cannot forget. Reviewers must know that these
+three columns are not written by application code; writing them there again would be a defect.
+
+**Alternatives considered.**
+- *Leave it in the services and widen `accounts_update`.* Rejected: work context grants read, not
+  write (§15.4), and widening it to make a denormalised column writable would hand a salesperson
+  edit rights over another person's customer record.
+- *A SECURITY DEFINER helper function the service calls.* Rejected: any authenticated user could
+  then call it through PostgREST and flip an arbitrary account to `ACTIVE`, or backdate somebody
+  else's recency. A trigger has no such surface.
+- *Compute all three in queries instead.* Rejected for `last_activity_at` and `stage_changed_at`:
+  §5.7 stores them, they are indexed, and the dormancy and stall queries scan them. `status` is a
+  business state a user can also set by hand, so it cannot be derived at all.
+
+---
+
+---
+
+## Master Phase 2 corrections
+
+Three defects were found and fixed while building the Core CRM. Recorded here because each
+changed behaviour that Master Phase 1 had signed off.
+
+| Defect | Where | Fix |
+|---|---|---|
+| `en-GB` abbreviates September as **"Sept"** — four letters — while every other month uses three, so §8.11's `dd MMM yyyy` was violated one month in twelve and date columns lost their alignment | `lib/dates.ts`, `lib/opportunity/title.ts` | Month taken from `en-US` (always three letters) and the `dd MMM yyyy` order imposed explicitly via `formatToParts`. Regression test covers all twelve months |
+| A `datetime-local` value carries no timezone; sending it to a `timestamptz` column made PostgreSQL read it in the session timezone (UTC), so a back-dated activity landed 5½ hours late | activity Server Action | `businessLocalToUtc()` anchors the wall-clock value to Asia/Kolkata before it is sent (CLAUDE.md §10) |
+| `expectRejected()` left the transaction aborted, so a second assertion in the same test failed with `25P02` rather than the rule under test — a test asserting only "it was rejected" could pass for the wrong reason | `tests/integration/harness.ts` | Each rejection now runs inside its own savepoint |
+
 ---
 
 ## Open items — none

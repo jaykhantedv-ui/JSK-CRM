@@ -101,6 +101,19 @@ describe('display formatting', () => {
     expect(formatDate('2026-08-19T06:00:00Z')).toBe('19 Aug 2026')
   })
 
+  it('abbreviates every month to exactly three letters (§8.11 `dd MMM yyyy`)', () => {
+    // Regression: `en-GB` renders September as "Sept" and every other month with
+    // three letters, so one month in twelve broke the format and the alignment of
+    // every date column. Checked across all twelve rather than only the culprit.
+    const months = Array.from({ length: 12 }, (_, index) =>
+      formatDate(`2026-${String(index + 1).padStart(2, '0')}-15T06:00:00Z`),
+    )
+    for (const rendered of months) {
+      expect(rendered).toMatch(/^\d{2} [A-Z][a-z]{2} \d{4}$/)
+    }
+    expect(months[8]).toBe('15 Sep 2026')
+  })
+
   it('renders date and time in Asia/Kolkata', () => {
     // 06:00 UTC is 11:30 IST.
     expect(formatDateTime('2026-08-19T06:00:00Z')).toMatch(/19 Aug 2026, 11:30\s*am/i)

@@ -158,15 +158,26 @@ Multi-table writes use a **Postgres RPC** rather than sequential client calls.
 | RPC | Security | Writes |
 |---|---|---|
 | `create_account_with_opportunity` | INVOKER | account → opportunity → activity (+ the `CREATED` event via trigger) |
-| `log_activity` | INVOKER | activity → `accounts.last_activity_at` → `opportunities.last_activity_at` → next-action decision |
+| `log_activity` | INVOKER | activity → next-action decision. The two `last_activity_at` columns are maintained by a trigger (ADR-020), not written here |
 | `change_opportunity_stage` | INVOKER | opportunity update (+ the stage event via trigger, reason via GUC) |
-| **`reassign_opportunity`** | **DEFINER** | `owner_id` — checks **`can_reassign()`** itself (ADR / B-02, H-05) |
-| `bulk_reassign` | **DEFINER** | many opportunities, same gate |
+| `reassign_opportunity` | INVOKER | `owner_id` + the `OWNER_CHANGED` event with its reason |
+| `bulk_reassign` | INVOKER | many opportunities, same policy |
 | `execute_import` | service-role | the whole batch, atomically (ADR-012) |
 
-`SECURITY INVOKER` is the default so RLS still applies. The two `DEFINER` exceptions exist because
-the table policy denies `owner_id` changes outright — §15.5 itself states *"Prefer the RPC — it is
-easier to test and audit."*
+**Every RPC is `SECURITY INVOKER`, so RLS still applies. The RPC buys atomicity, never authority.**
+
+This document previously planned `DEFINER` for the two reassignment RPCs, on the reading that the
+table policy "denies `owner_id` changes outright". It does not: `opportunities_update`'s
+`WITH CHECK` is `owner_id = current_user_id() or manages_outlet(outlet_id)`, which a manager for
+the record's outlet satisfies both before and after the change, and which a salesperson fails the
+moment `owner_id` names somebody else. The policy already expresses the rule precisely, so a
+`DEFINER` function would bypass it and then restate the same rule in PL/pgSQL — the one thing
+invariant 1 below exists to prevent — while exposing a callable function that moves ownership with
+its own privileges. Both roles are covered by integration tests. See `/docs/API.md` for the full
+deviation note.
+
+The reassignment RPCs exist at all only because ADR-001's reason GUC and the update must share one
+transaction, and PostgREST gives each statement its own.
 
 ### ADR-001 — the audit reason channel
 
@@ -370,3 +381,8 @@ These do not change without approval recorded in `/docs/DECISIONS.md` (§17.1, `
 9. **No client-side Supabase writes** — with exactly one approved exception, the ADR-005 signed
    Storage upload.
 10. **No `TODO-BD` value hard-coded anywhere.** Resolution fixed the values, not the mechanism.
+13. **Every RPC is `SECURITY INVOKER`** (ADR / §16.3). An RPC exists for atomicity, never to gain
+    authority the caller does not have. The only service-role paths are the three of §15.7.
+14. **Three denormalised columns are maintained by triggers, not by services** (ADR-020):
+    `stage_changed_at`, both `last_activity_at` columns, and the `won → accounts.status` promotion.
+    Writing them from application code again is a defect.

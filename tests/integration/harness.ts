@@ -130,17 +130,33 @@ export async function canSee(db: Db, table: string, id: string): Promise<boolean
  * rule rejected it. A statement that unexpectedly SUCCEEDS fails the test loudly —
  * a silently permitted write is the exact failure these tests exist to catch.
  */
+let savepointCounter = 0
+
 export async function expectRejected(
   db: Db,
   sql: string,
   params: unknown[] = [],
 ): Promise<{ code: string; message: string; constraint?: string }> {
+  // Wrapped in a savepoint so the surrounding transaction survives.
+  //
+  // A rejected statement aborts its transaction, and every statement after it
+  // fails with `in_failed_sql_transaction` (25P02) regardless of what it does.
+  // Without this, a test that checks several refusals in a row would report the
+  // second one as a permission failure when it was really just collateral — and,
+  // worse, a test asserting only "it was rejected" would pass for the wrong
+  // reason. The savepoint keeps each assertion independent and honest.
+  const name = `expect_rejected_${++savepointCounter}`
+  await db.query(`savepoint ${name}`)
+
   try {
     await db.query(sql, params)
   } catch (error) {
+    await db.query(`rollback to savepoint ${name}`)
     const e = error as { code: string; message: string; constraint?: string }
     return { code: e.code, message: e.message, constraint: e.constraint }
   }
+
+  await db.query(`release savepoint ${name}`)
   throw new Error(`Expected this statement to be rejected, but it succeeded:\n${sql}`)
 }
 

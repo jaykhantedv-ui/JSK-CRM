@@ -5,6 +5,12 @@
 **Decisions:** `/docs/DECISIONS.md` — **all 12 `TODO-BD` items resolved**, **14 ADRs** accepted,
 5 product decisions (C-1 … C-5).
 
+**Status: Master Phase 1 (platform foundation) and Master Phase 2 (Core CRM) are built.**
+Master Phase 2 delivered accounts, contacts, projects, opportunities, the pipeline, activities,
+next actions, global search, advisory duplicate detection and the mobile/desktop CRM screens —
+migrations 018–020, the seven CRM services, and 50 new unit plus 85 new integration tests. See the
+phase report and `/docs/TESTING.md` for the current suite state.
+
 **Status: this plan reflects the approved decisions of 2026-08-19 (Project Owner).**
 All ten blockers, all thirteen HIGH findings, all thirty MEDIUM findings and all five follow-on
 questions are closed. **The Decision Gate's criteria are met.** The plan is ready for

@@ -74,6 +74,14 @@ const CONSTRAINT_MESSAGES: Record<string, { message: string; field?: string }> =
     field: 'is_primary',
   },
   // users and outlets (§5.2, ADR-016)
+  project_stakeholders_contact_unique: {
+    message: 'That person is already on this project.',
+    field: 'contact_id',
+  },
+  project_stakeholders_account_unique: {
+    message: 'That company is already on this project.',
+    field: 'account_id',
+  },
   users_email_key: { message: 'A user with this email already exists.', field: 'email' },
   outlets_code_key: { message: 'An outlet with this code already exists.', field: 'code' },
   user_outlets_current_unique: { message: 'This user is already assigned to that outlet.', field: 'outlet_id' },
@@ -120,7 +128,10 @@ export function fromPostgrestError(error: PostgrestLikeError): AppError {
       return new AppError('VALIDATION_FAILED', 'A required field is missing.', { details: { constraint } })
     case '42501': // insufficient_privilege — including the guard triggers in 015
       return new AppError('FORBIDDEN', error.message ?? 'You do not have permission to do that.')
+    case 'P0002': // no_data_found — raised by raise_not_found() inside the RPCs (§16.3)
     case 'PGRST116': // no rows where exactly one was expected
+      // A record that is invisible and a record that does not exist give the
+      // same answer, so an attacker cannot probe for existence (§25, M-03).
       return new AppError('NOT_FOUND', 'That record no longer exists, or you cannot see it.')
     default:
       // Never surface the database's own words: they leak schema detail and mean

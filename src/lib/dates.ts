@@ -23,22 +23,34 @@ const ISO_DATE_PARTS = new Intl.DateTimeFormat('en-CA', {
   day: '2-digit',
 })
 
-const DISPLAY_DATE = new Intl.DateTimeFormat('en-GB', {
+/**
+ * The month abbreviation comes from `en-US`, deliberately, and the parts are
+ * reassembled by hand.
+ *
+ * `en-GB` renders September as **"Sept"** — four letters — while every other
+ * month is three. §8.11 specifies `dd MMM yyyy`, so an `en-GB` formatter produces
+ * "19 Sept 2026" one month in twelve and quietly breaks the alignment of every
+ * date column in the application. `en-US` abbreviates every month to three
+ * letters but orders the parts as "Sep 19, 2026", so the ordering is imposed here
+ * rather than taken from the locale.
+ */
+const DISPLAY_PARTS = new Intl.DateTimeFormat('en-US', {
   timeZone: BUSINESS_TIME_ZONE,
   day: '2-digit',
   month: 'short',
   year: 'numeric',
 })
 
-const DISPLAY_DATE_TIME = new Intl.DateTimeFormat('en-GB', {
+const DISPLAY_TIME_PARTS = new Intl.DateTimeFormat('en-US', {
   timeZone: BUSINESS_TIME_ZONE,
-  day: '2-digit',
-  month: 'short',
-  year: 'numeric',
   hour: '2-digit',
   minute: '2-digit',
   hour12: true,
 })
+
+function partsOf(formatter: Intl.DateTimeFormat, date: Date): Record<string, string> {
+  return Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]))
+}
 
 function toDate(value: Date | string): Date {
   const date = value instanceof Date ? value : new Date(value)
@@ -63,12 +75,15 @@ export function businessToday(now: Date | string = new Date()): string {
 
 /** `dd MMM yyyy` — the display format for every date in the application (§8.11). */
 export function formatDate(value: Date | string): string {
-  return DISPLAY_DATE.format(toDate(value))
+  const parts = partsOf(DISPLAY_PARTS, toDate(value))
+  return `${parts.day} ${parts.month} ${parts.year}`
 }
 
 /** `dd MMM yyyy, hh:mm am` in Asia/Kolkata. */
 export function formatDateTime(value: Date | string): string {
-  return DISPLAY_DATE_TIME.format(toDate(value))
+  const date = toDate(value)
+  const time = partsOf(DISPLAY_TIME_PARTS, date)
+  return `${formatDate(date)}, ${time.hour}:${time.minute} ${(time.dayPeriod ?? '').toLowerCase()}`
 }
 
 /** Whole days between two `yyyy-MM-dd` business dates. Positive means `b` is later. */
@@ -108,6 +123,50 @@ export function relativeDays(value: Date | string, now: Date | string = new Date
   if (months < 12) return months === 1 ? '1 month ago' : `${months} months ago`
   const years = Math.floor(days / 365)
   return years === 1 ? '1 year ago' : `${years} years ago`
+}
+
+/**
+ * Asia/Kolkata is UTC+05:30 all year. India has observed no daylight saving since
+ * 1945, so a fixed offset is a statement of fact here rather than a shortcut —
+ * and it is what lets a business-day boundary be expressed without `date-fns-tz`,
+ * which is deliberately not installed (M-13).
+ */
+export const BUSINESS_UTC_OFFSET = '+05:30'
+
+/**
+ * The instant a business day begins, as an ISO UTC string.
+ *
+ * Period boundaries — "won this month", "closed in the last 90 days" — compare
+ * against `timestamptz` columns, so the boundary has to be an instant. Taking
+ * midnight in UTC instead would put the first five and a half hours of every
+ * Indian day in the previous period (CLAUDE.md §10).
+ */
+export function businessDayStart(date: string): string {
+  return new Date(`${date}T00:00:00${BUSINESS_UTC_OFFSET}`).toISOString()
+}
+
+/** The first day of the month `date` falls in, as `yyyy-MM-dd` in Asia/Kolkata. */
+export function businessMonthStart(date: string = businessToday()): string {
+  return `${date.slice(0, 7)}-01`
+}
+
+/**
+ * A wall-clock `yyyy-MM-ddTHH:mm` from a `datetime-local` input, as an ISO UTC
+ * instant.
+ *
+ * The browser hands over a local time with **no timezone at all**. Sending it
+ * straight to a `timestamptz` column makes PostgreSQL read it in the session
+ * timezone — UTC on Supabase — so an activity logged at 2pm in Erode would be
+ * stored as 2pm UTC and read back as 7:30pm IST. Every back-dated activity would
+ * land five and a half hours late (CLAUDE.md §10).
+ *
+ * Returns null for anything that is not a wall-clock string, so a caller can tell
+ * "not supplied" from "supplied and wrong".
+ */
+export function businessLocalToUtc(value: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(value)) return null
+  const instant = new Date(`${value}${BUSINESS_UTC_OFFSET}`)
+  return Number.isNaN(instant.getTime()) ? null : instant.toISOString()
 }
 
 /** The current hour (0–23) in Asia/Kolkata. Used by the owner-summary gate (ADR-011). */

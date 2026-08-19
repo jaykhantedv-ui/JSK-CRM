@@ -366,13 +366,35 @@ document, and 016 re-asserts RLS and fails loudly if a table ever arrives withou
                              coalesce on the flag booleans (M-07)
 ```
 
+**Master Phase 2 adds three:**
+
+```
+018_system_maintained_columns   touch_stage_changed_at(), touch_last_activity_at(),
+                                apply_won_account_status() — the three denormalised columns move
+                                from "the service remembers" to "the database maintains" (ADR-020)
+019_crm_rpcs                    raise_not_found(), create_account_with_opportunity() (§11.1),
+                                log_activity() (§10.2), change_opportunity_stage() (§9.3),
+                                reassign_opportunity() (§11.9, closes B-02), bulk_reassign()
+                                — every one SECURITY INVOKER, so RLS still decides (§16.3)
+020_search_and_duplicates       like_escape(), search_crm() (§11.10),
+                                find_account_duplicates() (§8.9) — SECURITY INVOKER, so a record
+                                the caller cannot open is never in the result
+```
+
+The similarity thresholds of §8.9 are **parameters** of `find_account_duplicates`, not literals in
+the migration: `lib/duplicates.ts` holds them once and passes them in, so the numbers cannot drift
+apart. The transition matrix is likewise **not** restated in SQL — it lives in
+`lib/opportunity/transitions.ts` and is validated there (CLAUDE.md §13); the check constraints
+remain the backstop.
+
 `accounts` and `contacts` are mutually referential; **006 → 007 → 008 breaks the cycle. Do not
 attempt a single migration for both** (§5.12, §25).
 
-**Not yet written**, because Master Phase 1 does not build them: the Storage bucket and its
-policies (§15.6), and the `reassign_opportunity` RPC (B-02). Reassignment is already *denied* to a
-salesperson by the `opportunities` UPDATE policy — the RPC is the manager-side path and arrives
-with the feature. Dev seed data lives in `/supabase/seed/dev-fixtures.sql`, not in a migration.
+**Not yet written**, because no phase to date builds it: the Storage bucket and its policies
+(§15.6). The `reassign_opportunity` RPC (B-02) **is now written**, in 019 — it arrived with the
+feature, as planned. Reassignment was already *denied* to a salesperson by the `opportunities`
+UPDATE policy; the RPC is the manager-side path, and it exists as an RPC rather than a plain
+update because ADR-001's reason GUC and the update itself must share one transaction. Dev seed data lives in `/supabase/seed/dev-fixtures.sql`, not in a migration.
 
 ### The ordering corrections
 
@@ -388,6 +410,16 @@ with the feature. Dev seed data lives in `/supabase/seed/dev-fixtures.sql`, not 
 5. **H-04** — RLS is enabled per table, in that table's migration. A single late migration as the
    first place RLS exists would leave every intermediate state unprotected. 016 keeps the policies
    and re-asserts the flag.
+
+### A third defect, found in Master Phase 2 — recency never moved for shared accounts
+
+`accounts.last_activity_at` was to be written by the service. It cannot be: a salesperson may log
+an activity against an account they do not own (the §3.2 work-context rule, permitted by
+`activities_insert`), but `accounts_update` requires ownership or outlet management, so the
+service's update matched **zero rows and silently succeeded**. Recency on Customer 360 — and every
+dormancy query built on it — would have stopped moving for exactly the collaborative accounts
+where activity matters most. Fixed by the SECURITY DEFINER trigger in 018; see **ADR-020**, which
+also covers `stage_changed_at` and the `won → accounts.status` side effect for the same reason.
 
 ### Two defects found by running the migrations
 

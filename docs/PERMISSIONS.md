@@ -280,13 +280,23 @@ subquery returns every row, and reading `opportunities` inside an `opportunities
 
 **Resolution:** the `WITH CHECK` clause already denies a salesperson's `owner_id` change without
 any subquery — after the change the row no longer satisfies `owner_id = current_user_id()`, so the
-policy refuses it with 42501. The manager-side path is the `SECURITY DEFINER`
-**`reassign_opportunity`** RPC, which checks `is_manager_or_above()` itself — now `MANAGER, OWNER`
-after ADR-017, so **ADMIN is excluded** (H-05). §15.5 states the same preference: *"Prefer the RPC
-— it is easier to test and audit."* `bulk_reassign` follows the same pattern.
+policy refuses it with 42501.
 
-**The RPC is not written yet** — it arrives with the reassignment feature in a later Master Phase.
-The denial it complements is already in place and tested.
+**Built in Master Phase 2 (migration 019).** The manager-side path is the **`reassign_opportunity`**
+RPC, and it is **`SECURITY INVOKER`**, not `DEFINER` as this document previously planned. The same
+`WITH CHECK` that denies the salesperson *permits* a manager for the record's outlet, before and
+after the change, so the policy already expresses the whole rule. A `DEFINER` function would bypass
+that policy and then restate the rule in PL/pgSQL — the same rule in two places, which is what
+CLAUDE.md §6 forbids — and would expose a callable function that moves ownership with its own
+privileges. `bulk_reassign` follows the same pattern and returns 0 for a salesperson.
+
+ADMIN is excluded either way (H-05, ADR-017): it holds no outlet rows, so `manages_outlet()` is
+false for every record and `is_manager_or_above()` does not include it.
+
+The RPC exists rather than a plain update only because ADR-001's reason GUC must share a
+transaction with the update. Both roles are covered in
+`tests/integration/crm-permissions.test.ts`: a manager reassigns and the reason lands on the
+`OWNER_CHANGED` event; a salesperson calling the RPC directly is refused with 42501.
 
 ---
 

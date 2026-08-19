@@ -1,7 +1,11 @@
 # API and Services
 
-Derived from `CLAUDE_CODE_BUILD_SPEC.md` §16, §10.2, §17.2. **Nothing here has been built yet** —
-this is the contract Phase 6 onward implements.
+Derived from `CLAUDE_CODE_BUILD_SPEC.md` §16, §10.2, §17.2.
+
+**Built as of Master Phase 2 (Core CRM):** accounts, contacts, projects, opportunities, activities,
+search, and the `/today` plus basic-pipeline halves of the dashboard service. **Not built:** import,
+archive, merge, the manager/owner dashboard panels, reports and the cron routes — those are later
+master phases and are listed here as the contract they will implement.
 
 ---
 
@@ -150,11 +154,40 @@ Multi-table writes go through a Postgres RPC so they are atomic and **RLS still 
 | RPC | Called by | Writes |
 |---|---|---|
 | `create_account_with_opportunity` | §11.1 primary mobile flow | account (owner = caller, status `PROSPECT`) → opportunity (stage `new`, auto title) → activity (`NOTE` / `ENQUIRY`) → `CREATED` event via trigger |
-| `log_activity` | `logActivity()` | activity → `accounts.last_activity_at` → `opportunities.last_activity_at` → next-action decision → returns the updated opportunity |
+| `log_activity` | `logActivity()` | activity → next-action decision → returns the updated opportunity. **The two `last_activity_at` columns are NOT written here** — a trigger maintains them, because a work-context salesperson may log the activity without being able to update the parent (**ADR-020**) |
 | `change_opportunity_stage` | `changeOpportunityStage()` | opportunity update → stage event via trigger; the reason reaches the event row through the transaction-local `app.event_reason` GUC (**ADR-001**) |
-| `reassign_opportunity` | `assign/reassignOpportunity()` | `owner_id` — **`SECURITY DEFINER`**, checks `can_reassign()` itself (§15.5, **B-02**, **H-05**) |
+| `reassign_opportunity` | `reassignOpportunity()` | `owner_id` + `OWNER_CHANGED` event with its reason — **`SECURITY INVOKER`**, see the deviation note below (§15.5, **B-02**) |
 | `bulk_reassign` | `bulkReassign()` | many opportunities + owner events |
 | `execute_import` | `executeImport()` | the whole batch, service-role (§20.5, **H-08**) |
+
+### Deviation — `reassign_opportunity` is SECURITY INVOKER, not DEFINER
+
+This document previously specified `SECURITY DEFINER` with an internal `can_reassign()` check. It
+was built as `SECURITY INVOKER` instead, and the reason is that the DEFINER version buys nothing
+and costs a control.
+
+The `opportunities_update` policy already expresses the rule exactly:
+
+```sql
+using       (owner_id = current_user_id() or manages_outlet(outlet_id))
+with check  (owner_id = current_user_id() or manages_outlet(outlet_id))
+```
+
+A manager for the record's outlet satisfies both clauses before and after the change. A
+salesperson satisfies `USING` on their own record but fails `WITH CHECK` the moment `owner_id`
+names somebody else — so reassignment is refused by the database, with no application check
+involved. A `SECURITY DEFINER` function would bypass that policy and then have to re-implement it
+in PL/pgSQL, which is the same rule written twice, in the one place CLAUDE.md §6 says the rule must
+live once. It would also expose a callable function that moves ownership with its own privileges.
+
+Both cases are covered in `tests/integration/crm-permissions.test.ts`: a manager's reassignment
+succeeds and writes the reason to the `OWNER_CHANGED` event; a salesperson calling the same RPC
+directly is refused with `42501`.
+
+The function is an RPC at all — rather than a plain update — only because ADR-001 sends the reason
+to the audit trigger through a transaction-local GUC, and PostgREST gives each statement its own
+transaction. A `set_config` in one request and an update in the next would record every
+reassignment with an empty reason.
 
 ---
 
@@ -164,7 +197,11 @@ One transaction:
 
 1. Insert the activity. **`account_id` is always resolved and populated**, even when launched from
    an opportunity.
-2. Update `accounts.last_activity_at` and, when applicable, `opportunities.last_activity_at`.
+2. `accounts.last_activity_at` and, when applicable, `opportunities.last_activity_at` are updated —
+   **by the trigger from migration 018, not by this function** (ADR-020). A salesperson may log an
+   activity against an account they do not own, and cannot update that account, so a write here
+   would silently match zero rows. Back-dating uses `greatest(...)`, so logging last month's call
+   never makes an account look staler than it is.
 3. Apply the next-action decision from the same form:
    - a date and type were given → update the opportunity's `next_action` and `next_action_date`;
    - **"cannot determine yet" → set both to null**; the opportunity appears in Missing Next Action;
@@ -183,7 +220,7 @@ One transaction:
 | Target stage | The service must |
 |---|---|
 | `quoted` | Require quotation fields; set `quotation_status = 'SENT'` if currently `NONE` |
-| `won` | Require `final_order_value`; set `closed_at`; clear next action; set `accounts.status = 'ACTIVE'`; **prompt (never auto-create)** a follow-on opportunity for another category on the same project |
+| `won` | Require `final_order_value`; set `closed_at`; clear next action; `accounts.status = 'ACTIVE'` is applied by the trigger from 018 (ADR-020); **prompt (never auto-create)** a follow-on opportunity for another category on the same project |
 | `lost` | Require `lost_reason`; set `closed_at`; clear next action |
 | `nurture` | Require `next_action_date`; warn if under 14 days out |
 | any backward move | **Require a `reason`**, stored on the `opportunity_events` row |
