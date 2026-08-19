@@ -7,7 +7,7 @@ Two registers:
   `system_settings`, never in code: a resolved decision fixes the *value*, it does not licence a
   constant. Changing a value must still never require a deploy.
 - **B. Architecture decision record** — stack or architecture changes. §17.1 requires the reason
-  to be recorded **before** implementing the change. **Fourteen ADRs** are accepted below.
+  to be recorded **before** implementing the change. **Fifteen ADRs** are accepted below.
 - **C. Product decisions closing the remaining audit findings** — the five product/permission
   questions the audit raised that are neither `TODO-BD` items nor architecture changes.
 
@@ -681,6 +681,56 @@ execution resets the count to 0.**
 **Alternatives considered.** A twelfth table for job runs (breaks §4.1 for two integers); an
 `opportunity_events` row (the failure belongs to no opportunity); in-memory state (does not
 survive a serverless invocation, which is the entire problem).
+
+---
+
+### ADR-015 — Tailwind CSS v4 (CSS-first configuration)
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Supersedes:** the `tailwind.config.ts` entry in the Phase 1 expected-file list
+**Affects:** Phase 1 (foundation), Phase 7 (design system)
+
+**Context.** §17.1 freezes "Tailwind CSS" as the styling layer without naming a major version.
+The Phase 1 expected-file list in `/docs/IMPLEMENTATION_PLAN.md` named `tailwind.config.ts`, which
+is a **Tailwind v3** artifact: v3 configures through a JavaScript/TypeScript config file, while
+**v4 is CSS-first** — design tokens live in the stylesheet under `@theme`, and the PostCSS plugin
+moves to `@tailwindcss/postcss`. Building a greenfield application on v3 in 2026 would mean
+adopting the previous major deliberately. The question surfaced during Phase 1 implementation and
+was flagged rather than resolved silently (`CLAUDE.md` §2).
+
+**Decision.** **Tailwind CSS v4 is accepted for the project foundation.**
+
+- The Phase 1 expected-file reference to `tailwind.config.ts` is **superseded** by the Tailwind v4
+  CSS-first configuration model.
+- The existing v4 implementation in **`src/app/globals.css`** and **`postcss.config.mjs`** is
+  **authoritative**.
+- **No `tailwind.config.ts` is to be added solely to satisfy the old Phase 1 file list.**
+
+**Scope of this decision.** This is an **implementation/tooling decision only**. It does **not**
+change:
+
+- the CRM product requirements (§1–§14),
+- the database architecture or the eleven-table model (§4, §5),
+- the RLS authorization model (§15),
+- the service / Server-Action boundary (§16, §17.2),
+- or any other part of the frozen application architecture (§17.1).
+
+Tailwind remains the styling layer named in §17.1; only its configuration mechanism differs from
+what the Phase 1 file list assumed.
+
+**Consequences.**
+- Design tokens (§12.1 — neutral greys, one accent, semantic state colour) are declared as CSS
+  custom properties in `globals.css` and exposed to utilities through `@theme inline`. There is
+  one place to read them, which suits the shadcn/ui token model.
+- `postcss.config.mjs` loads `@tailwindcss/postcss` rather than the v3 `tailwindcss` plugin.
+- shadcn/ui supports v4; `components.json` records `tailwind.config: ""` accordingly.
+- A reviewer looking for `tailwind.config.ts` will not find one. That absence is intentional and
+  is recorded here so it is never "fixed" by adding the file back.
+
+**Alternatives considered.** Pinning Tailwind v3 to match the original file list — rejected: it
+adopts a superseded major for a system with a multi-year life, and the file list was written
+before the version question was examined. The file list is descriptive of expected artifacts, not
+a specification clause; §17.1 names Tailwind, not a Tailwind major.
 
 ---
 

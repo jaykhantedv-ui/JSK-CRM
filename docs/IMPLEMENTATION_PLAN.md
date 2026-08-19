@@ -78,10 +78,16 @@ nothing more.
 
 **Dependencies.** None. This is the only phase with no upstream blockers.
 
-**Files/modules.** `package.json`, `next.config.ts`, `tsconfig.json` (strict), `tailwind.config.ts`,
+**Files/modules.** `package.json`, `next.config.ts`, `tsconfig.json` (strict),
 `postcss.config.mjs`, `eslint.config.mjs`, `vitest.config.ts`, `playwright.config.ts`,
-`.env.example`, `.gitignore`, `src/app/layout.tsx`, `src/app/globals.css`, the empty §18 folder
-tree with `.gitkeep`, `/tests/{unit,integration,e2e}`.
+`components.json`, `.env.example`, `.gitignore`, `src/app/{layout.tsx,globals.css,page.tsx}`,
+`src/lib/utils.ts`, the empty §18 folder tree with `.gitkeep`,
+`/tests/{unit,integration,e2e}`.
+
+> **No `tailwind.config.ts`.** Tailwind v4 is CSS-first: design tokens live in `globals.css`
+> under `@theme`, and PostCSS loads `@tailwindcss/postcss`. The earlier reference to
+> `tailwind.config.ts` in this list was a Tailwind v3 artifact and is **superseded by ADR-015**.
+> **Do not add the file to satisfy the old list.**
 
 **Database changes.** None.
 
@@ -90,7 +96,10 @@ tree with `.gitkeep`, `/tests/{unit,integration,e2e}`.
 - **M-14** — magic-byte MIME verification is a **hand-rolled signature check** for JPEG, PNG,
   WebP and PDF. **`file-type` is not installed.**
 - **M-30 / ADR-000** — an ESLint import-boundary rule is **approved** as the one permitted
-  dev-dependency addition, to enforce §18's no-cross-feature-import rule.
+  dev-dependency addition. **As built, the allowance was not needed**: ESLint's core
+  `no-restricted-imports` enforces the rule with zero added packages, which `CLAUDE.md` §16
+  permits as an equivalent to `import/no-restricted-paths`.
+- **ADR-015** — **Tailwind CSS v4**, CSS-first. No `tailwind.config.ts`.
 - **M-28** — `.env.example` gains the Resend sender address, CI/Supabase-CLI credentials and
   Playwright per-role test credentials alongside the §17.4 list.
 
@@ -107,6 +116,23 @@ boots. `npm run build` clean.
 
 **Risks.** Dependency creep — the shadcn CLI pulls in transitive packages; audit the lockfile
 against §17.1 before committing.
+
+## As built — Phase 1 completed and approved 2026-08-19
+
+| Decision taken during implementation | Record |
+|---|---|
+| **Tailwind CSS v4**, CSS-first; no `tailwind.config.ts` | **ADR-015** |
+| **Next.js pinned to 15.5.23** — `next@16` is latest, but §17.1 freezes Next.js 15 | §17.1 |
+| **TypeScript 5.9.3 / ESLint 9** — TS 7 and ESLint 10 are outside what Next 15 and `eslint-config-next@15` support | §17.1 |
+| **`@playwright/test` pinned to 1.56.1** — the release shipping the Chromium revision the CI image provides, rather than hardcoding a machine-specific `executablePath` | §19.3 |
+| **Import boundary via ESLint core `no-restricted-imports`** — no plugin installed; the M-30 allowance is unspent | `CLAUDE.md` §16 |
+| **`clsx` + `tailwind-merge`** installed as the mandatory runtime dependencies of shadcn/ui's `cn()` | §17.1 |
+| **Vitest `projects`** (`unit` / `integration`) so `test:integration` targets `tests/integration/**` when Phase 3 populates it | §19.1, §19.2 |
+| **`/supabase` not created** — Phase 2 owns `config.toml`, `migrations/` and `seed/` | Phase 2 |
+
+Verified at completion: `npm install`, `npm run build`, `npm run typecheck`, `npm run lint`,
+`npm run test`, `npm run test:e2e` all pass; the dev server boots and serves; the import-boundary
+rule was proven to fail a cross-feature import and permit a same-feature relative import.
 
 ---
 

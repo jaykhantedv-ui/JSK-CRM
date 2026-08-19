@@ -44,7 +44,7 @@ Next.js 15 App Router  (Vercel)
 | Database | Supabase Postgres, **`ap-south-1` (Mumbai)** | RLS is the permission model; **Indian data residency is required (TODO-BD-08)** |
 | Auth | Supabase Auth (email + password) | No custom crypto; integrates with RLS via `auth.uid()`; **its built-in rate limiting satisfies §15.8 — no Redis (C-5)** |
 | Data access | `@supabase/ssr` server client with the user session | RLS enforced on every query automatically |
-| UI | Tailwind + shadcn/ui + lucide-react | Components owned in-repo |
+| UI | **Tailwind CSS v4** (CSS-first, no `tailwind.config.ts` — ADR-015) + shadcn/ui + lucide-react | Components owned in-repo |
 | Validation | Zod, schemas shared client/server | One definition |
 | Forms | react-hook-form + zodResolver | |
 | Client state | TanStack Query (lists/filters only) | No Redux, no Zustand |
