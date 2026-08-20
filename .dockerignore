@@ -1,0 +1,22 @@
+# Keep the build context small and keep secrets out of the image entirely.
+.git
+.github
+node_modules
+.next
+npm-debug.log*
+
+# Secrets — these must never enter a build context, let alone an image layer.
+.env
+.env.*
+!.env.example
+
+# Not needed to build or run the application.
+tests
+playwright-report
+test-results
+coverage
+docs
+supabase/seed/dev-fixtures.sql
+backups
+*.md
+!README.md

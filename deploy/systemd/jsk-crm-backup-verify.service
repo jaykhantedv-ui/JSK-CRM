@@ -1,0 +1,16 @@
+# Weekly proof that the backups are actually restorable (§10).
+#
+# Restores the newest backup into a scratch database, runs the verification
+# queries, then drops it. Touches nothing anyone is using. A backup that has
+# never been restored is a guess, and this is what turns it into a fact.
+
+[Unit]
+Description=JSK CRM weekly restore verification
+After=jsk-crm.service
+Requires=jsk-crm.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jsk-crm
+ExecStart=/bin/bash -c '/opt/jsk-crm/deploy/restore.sh --scratch "$(ls -1t /var/backups/jsk-crm/*.dump.enc | head -1)"'
+TimeoutStartSec=3600

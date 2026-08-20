@@ -1,0 +1,204 @@
+# JSK CRM — the whole production stack for ONE office server (ADR-033).
+#
+# Six services. Everything the application needs and nothing it does not:
+# no orchestrator, no message queue, no Redis, no separate API server, no
+# metrics stack (§3, §11).
+#
+#   db        PostgreSQL with the Supabase extensions and roles
+#   auth      GoTrue — sign-in, sessions, JWTs
+#   rest      PostgREST — the data API that enforces RLS
+#   storage   file uploads (quotations, site photos)
+#   gateway   nginx, putting auth/rest/storage behind one origin
+#   app       the CRM itself
+#
+# `tunnel` is an optional seventh, in the `tunnel` profile, for remote access.
+#
+# WHY A GATEWAY. @supabase/supabase-js takes ONE base URL and appends /auth/v1,
+# /rest/v1 and /storage/v1 to it, so something has to route those three prefixes
+# to three containers. nginx does it in forty lines. Upstream Supabase uses Kong
+# for this, which is a heavier dependency than a two-outlet business needs. It
+# terminates no TLS and holds no policy — HTTPS arrives from the Cloudflare
+# tunnel, and authorization is RLS in the database (CLAUDE.md §6).
+#
+# NOTHING BUT THE TUNNEL IS PUBLISHED TO THE INTERNET. Ports are bound to
+# 127.0.0.1 so that Postgres, GoTrue, PostgREST and Storage are reachable from
+# the server itself and from other containers, and from nowhere else (§8).
+
+name: jsk-crm
+
+services:
+  db:
+    image: supabase/postgres:15.8.1.060
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      # The database session timezone stays UTC, exactly as it is on hosted
+      # Supabase. Every business-day expression in the schema says
+      # `at time zone 'Asia/Kolkata'` for itself, and a server that quietly ran
+      # in IST would hide a bug that reappears the day it moves (CLAUDE.md §10).
+      - -c
+      - timezone=UTC
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-54322}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  auth:
+    image: supabase/gotrue:v2.177.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: '9999'
+      API_EXTERNAL_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${PUBLIC_URL}
+      GOTRUE_URI_ALLOW_LIST: ${PUBLIC_URL}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      GOTRUE_JWT_EXP: '3600'
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_AUD: authenticated
+      # §3.2 — there is no self-registration, in any environment. Users are
+      # created by an OWNER or an ADMIN through the provisioning Server Action.
+      GOTRUE_DISABLE_SIGNUP: 'true'
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: 'true'
+      GOTRUE_MAILER_AUTOCONFIRM: 'true'
+      # Email is OPTIONAL INFRASTRUCTURE (§9). With no SMTP configured GoTrue
+      # still signs people in; only password-reset mail is unavailable, and an
+      # ADMIN can reset a password from /settings instead.
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-no-reply@localhost}
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:9999/health']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  rest:
+    image: postgrest/postgrest:v12.2.12
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: 'false'
+      # PostgREST switches to the JWT's role for every request, which is what
+      # makes RLS the authorization boundary rather than the application (§15).
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+
+  storage:
+    image: supabase/storage-api:v1.19.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    environment:
+      ANON_KEY: ${ANON_KEY:?ANON_KEY is required}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY:?SERVICE_ROLE_KEY is required}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      FILE_SIZE_LIMIT: '10485760' # 10 MB — §15.6
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: jsk
+      REGION: local
+      GLOBAL_S3_BUCKET: jsk
+    volumes:
+      - storage-data:/var/lib/storage
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:5000/status']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+      storage:
+        condition: service_started
+    volumes:
+      - ./deploy/gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - '127.0.0.1:${SUPABASE_PORT:-54321}:8000'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8000/rest/v1/']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL:?PUBLIC_SUPABASE_URL is required}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY}
+        NEXT_PUBLIC_APP_URL: ${PUBLIC_URL}
+        NEXT_PUBLIC_DEMO_MODE: ${DEMO_MODE:-0}
+    image: jsk-crm-app:latest
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY}
+      NEXT_PUBLIC_APP_URL: ${PUBLIC_URL}
+      NEXT_PUBLIC_DEMO_MODE: ${DEMO_MODE:-0}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      CRON_SECRET: ${CRON_SECRET:?CRON_SECRET is required}
+      # Email is optional. Unset, the notification service does not send and the
+      # CRM is unaffected (§9).
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-}
+      TZ: Asia/Kolkata
+    ports:
+      - '127.0.0.1:${APP_PORT:-3000}:3000'
+
+  # Remote access, outbound only: the tunnel dials Cloudflare, so no port is
+  # forwarded on the office router and nothing is exposed inbound (§8).
+  # Started only with `--profile tunnel`.
+  tunnel:
+    image: cloudflare/cloudflared:2025.8.1
+    restart: unless-stopped
+    profiles: ['tunnel']
+    depends_on:
+      app:
+        condition: service_started
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+
+volumes:
+  db-data:
+  storage-data:

@@ -1,0 +1,13 @@
+# The nightly encrypted backup (§10).
+
+[Unit]
+Description=JSK CRM nightly backup
+After=jsk-crm.service
+Requires=jsk-crm.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jsk-crm
+ExecStart=/opt/jsk-crm/deploy/backup.sh
+# The weekly --verify run restores into a scratch database and can take minutes.
+TimeoutStartSec=1800

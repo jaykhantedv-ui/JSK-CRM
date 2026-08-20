@@ -198,3 +198,74 @@ non-zero row is a conversation with the owner, never a row to quietly `UPDATE`.*
 | A screen is slow | `/docs/DEPLOYMENT.md` §7A, then EXPLAIN the query as the affected role — RLS cost is invisible when you test as `postgres` |
 | A file will not upload | Over 10 MB, or the magic bytes do not match the extension. Both are deliberate refusals |
 | A bad import landed | Roll the batch back from `/import` while it is still eligible. Rollback refuses after a legitimate edit, on purpose |
+
+---
+
+## The office server (ADR-033)
+
+Everything above describes the hosted deployment. On the office PC the commands are
+these. Full instructions: [`DEPLOYMENT.md`](DEPLOYMENT.md) §10.
+
+```bash
+cd /opt/jsk-crm
+
+deploy/start.sh            # start everything (safe to re-run)
+deploy/start.sh --build    # rebuild the app image first, after a git pull
+deploy/start.sh --tunnel   # also bring up the Cloudflare tunnel
+deploy/stop.sh             # stop the containers, keep the data
+
+deploy/health.sh           # app, database, restart-loops, disk, backup freshness
+deploy/migrate.sh --status # what is applied, what is pending
+```
+
+### Is it actually working?
+
+```bash
+deploy/health.sh
+```
+
+`HEALTHY` means the app answers, the database answers through PostgREST, there is
+disk space, and a backup was written in the last 48 hours. Anything else prints
+which of those failed.
+
+### Scheduled jobs
+
+```bash
+systemctl list-timers 'jsk-crm*'                  # when each next runs
+journalctl -u jsk-crm-cron@maintenance --since today
+systemctl start jsk-crm-cron@daily-digest.service  # run one now
+```
+
+### Backups
+
+```bash
+deploy/backup.sh                 # take one now
+deploy/backup.sh --verify        # take one and prove it restores
+ls -lh /var/backups/jsk-crm      # what is held
+
+deploy/restore.sh --scratch /var/backups/jsk-crm/<file>.dump.enc   # prove it, safely
+deploy/restore.sh --live    /var/backups/jsk-crm/<file>.dump.enc   # the real thing
+```
+
+### Demo / training data
+
+```bash
+scripts/demo.sh                  # rebuild the database with synthetic data
+DEMO_PASSWORD=... scripts/demo.sh
+```
+
+**Never on the production server.** The script refuses `NODE_ENV=production` and a
+hosted Supabase URL, but the real protection is not running it there. Training runs
+on a second machine, or on the same machine before the real data is loaded.
+
+### When the power goes out
+
+Nothing to do. Containers restart, PostgreSQL replays its write-ahead log, and
+`jsk-crm.service` brings the stack back at boot. Check `deploy/health.sh`
+afterwards. A UPS is what keeps a write from being interrupted in the first place.
+
+### When the server will not come back
+
+[`DEPLOYMENT.md`](DEPLOYMENT.md) §11.4. In short: new machine, Docker, clone,
+restore `deploy/env/production.env` from the safe, `deploy/start.sh --build`,
+`deploy/restore.sh --live <newest backup>`.

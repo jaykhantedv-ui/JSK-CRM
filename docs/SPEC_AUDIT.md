@@ -991,5 +991,5 @@ neither was silently "fixed" (§28):
 
 | Finding | What it means |
 |---|---|
-| `material_types` is `[]` | An empty list removes a field's options from every enquiry form, which looks like a bug to a salesperson. **The owner must supply the list before launch** (§33). |
+| `material_types` is `[]` | An empty list removes a field's options from every enquiry form, which looks like a bug to a salesperson. **RESOLVED 2026-08-20** — the Project Owner amended TODO-BD-04 and migration `030_material_types_seed.sql` seeds the launch taxonomy. Still editable at `/settings`, still no product catalogue. |
 | One MANAGER has no outlet scope | Correct and deliberate — ADR-016 makes a manager with an empty scope see only their own records, which is safe by default for a newly created manager. Reported so it is a decision rather than an oversight. |

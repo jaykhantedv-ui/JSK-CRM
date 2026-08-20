@@ -478,3 +478,224 @@ as the single approved exception).
 - **Import:** a batch may be rolled back by OWNER within 7 days, archiving (never deleting) every
   record carrying that `import_batch_id`. Nightly maintenance must not invalidate that window
   (H-09).
+
+---
+
+# 10. Self-hosting on the office server (ADR-033)
+
+**This is the launch path.** Sections 1–9 above describe the hosted deployment
+(Vercel + Supabase Cloud), which is now an *optional upgrade* rather than a
+requirement — see §12 below.
+
+Everything here runs on **one PC in the office**, at **₹0/month recurring**.
+
+## 10.1 What runs
+
+Six containers, one machine:
+
+| Service | Image | What it does |
+|---|---|---|
+| `db` | `supabase/postgres` | PostgreSQL with the Supabase extensions and roles |
+| `auth` | `supabase/gotrue` | Sign-in, sessions, JWTs |
+| `rest` | `postgrest/postgrest` | The data API — **this is what enforces RLS** |
+| `storage` | `supabase/storage-api` | File uploads, 10 MB limit (§15.6) |
+| `gateway` | `nginx` | Puts auth/rest/storage behind one origin |
+| `app` | built here | The CRM |
+
+Plus `tunnel` (`cloudflared`), started only with `--profile tunnel`, for access
+from outside the shop.
+
+**Only the tunnel faces the internet.** Every other port is bound to `127.0.0.1`.
+Postgres, GoTrue, PostgREST and Storage are not reachable from the network, and
+no router port is forwarded.
+
+## 10.2 What the owner must do once
+
+These cannot be automated from this repository:
+
+1. **Install Linux** on the office PC — Ubuntu Server LTS is the easy choice.
+2. **Install Docker Engine** and the Compose plugin.
+3. **Plug in an external USB drive** for backups and note its mount path.
+4. *(Optional, for access from outside the shop)* create a free Cloudflare
+   account, add a domain, create a tunnel, and copy the tunnel token.
+
+Recommended, and worth the money: a **UPS** (a power cut mid-write is the one
+thing that can corrupt a database), **wired Ethernet** rather than Wi-Fi, and an
+**SSD** rather than a spinning disk.
+
+## 10.3 Install
+
+```bash
+sudo git clone <repo-url> /opt/jsk-crm
+cd /opt/jsk-crm
+
+cp deploy/env/production.env.example deploy/env/production.env
+deploy/keygen.sh >> deploy/env/production.env
+```
+
+`keygen.sh` generates the database password, the JWT secret, the anon and
+service-role keys (real JWTs signed with that secret), the cron secret and the
+backup passphrase.
+
+> **Print `BACKUP_PASSPHRASE` and put it in the safe.** Encrypted backups cannot
+> be read without it — by anyone, including us.
+
+Then edit `deploy/env/production.env` and set the two addresses:
+
+```
+PUBLIC_URL=http://192.168.1.50:3000           # the server's LAN address
+PUBLIC_SUPABASE_URL=http://192.168.1.50:54321
+```
+
+Both must be reachable **from a staff member's browser**, not just from the
+server — the browser calls the Supabase gateway directly.
+
+## 10.4 Start
+
+```bash
+deploy/start.sh --build
+```
+
+That brings up the database, waits for auth and storage to create their schemas,
+applies all migrations, then starts the gateway and the application. It is safe to
+re-run.
+
+Check it:
+
+```bash
+deploy/health.sh
+```
+
+## 10.5 Start automatically on boot
+
+```bash
+sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now jsk-crm.service
+sudo systemctl enable --now jsk-crm-cron@daily-digest.timer \
+                            jsk-crm-cron@manager-digest.timer \
+                            jsk-crm-cron@owner-summary.timer \
+                            jsk-crm-cron@new-opportunity-sla.timer \
+                            jsk-crm-cron@maintenance.timer \
+                            jsk-crm-backup.timer \
+                            jsk-crm-backup-verify.timer
+systemctl list-timers 'jsk-crm*'
+```
+
+The timers reproduce `vercel.json` exactly, in UTC:
+
+| Job | UTC | IST |
+|---|---|---|
+| `new-opportunity-sla` | hourly | hourly |
+| `owner-summary` | hourly | hourly, gates on the configured hour (ADR-011) |
+| `daily-digest` | 03:00 | 08:30 |
+| `manager-digest` | 03:30 | 09:00 |
+| `maintenance` | 20:30 | 02:00 next day |
+| backup | 21:00 | 02:30 |
+| restore verification | Sun 22:00 | Mon 03:30 |
+
+## 10.6 Create the real users and outlets
+
+Sign in as the first OWNER, then:
+
+1. **Settings → Outlets** — rename the two outlets to the real showroom names.
+2. **Settings → Users** — create the 20 real users: 1 owner, 1 admin, 2 managers,
+   16 salespeople.
+3. **Give every manager at least one outlet.** A manager with no outlet scope sees
+   no data at all and it looks like a broken login rather than a setting.
+4. **Settings** — check the cities, material types and thresholds.
+
+## 10.7 Remote access (optional)
+
+```bash
+# after putting CLOUDFLARE_TUNNEL_TOKEN in deploy/env/production.env
+deploy/start.sh --tunnel
+```
+
+The tunnel dials out to Cloudflare. Nothing is exposed inbound and no router
+configuration is needed. HTTPS terminates at Cloudflare's edge.
+
+If the CRM is only ever used inside the shop, skip this entirely.
+
+---
+
+# 11. Backups on the office server (§10)
+
+## 11.1 What happens automatically
+
+Every night at 02:30 IST:
+
+1. `pg_dump` of `public`, `auth` and `storage` — the whole business record,
+   including the login identities, run **inside** the db container.
+2. Encrypted with AES-256 (pbkdf2, 600k iterations).
+3. **Decrypted again and compared against the original** before it is kept. An
+   unverified backup is a guess.
+4. Written to `BACKUP_DIR`, copied to `BACKUP_EXTERNAL_DIR` if the drive is
+   mounted, and a `.sha256` written alongside.
+5. Anything older than `BACKUP_RETENTION_DAYS` (default 30) is pruned.
+
+Every Sunday night the newest backup is **restored into a scratch database**,
+verified with `scripts/verify-restore.sql`, and the scratch database dropped. It
+touches nothing anyone is using.
+
+## 11.2 By hand
+
+```bash
+deploy/backup.sh              # take one now
+deploy/backup.sh --verify     # take one and prove it restores
+
+deploy/restore.sh --scratch /var/backups/jsk-crm/jsk-crm-....dump.enc   # prove it
+deploy/restore.sh --live    /var/backups/jsk-crm/jsk-crm-....dump.enc   # the real thing
+```
+
+`--live` replaces the live database and asks for confirmation in words that cannot
+be typed by accident.
+
+## 11.3 Off-site
+
+The external drive covers a dead server. It does not cover fire or theft, because
+it is in the same room.
+
+**Once a month, take a copy off-site.** Any of these works — the file is already
+encrypted, so the destination does not have to be trusted:
+
+- a second USB drive kept at home or in the bank locker (simplest, ₹0/month)
+- upload the `.dump.enc` to any cloud drive
+- the optional AWS S3 path in §7.2, if that account is ever opened
+
+## 11.4 If the server dies
+
+1. Install Linux and Docker on the replacement.
+2. Clone the repository to `/opt/jsk-crm`.
+3. Restore `deploy/env/production.env` from the safe — or regenerate the keys,
+   which means everyone signs in again.
+4. `deploy/start.sh --build`
+5. `deploy/restore.sh --live <newest backup>`
+6. `deploy/health.sh`
+
+Recovery is bounded by how recent the backup is: at worst, one day's entries.
+
+---
+
+# 12. What still costs money, and what does not
+
+**₹0/month:** the application, PostgreSQL, authentication, storage, the
+scheduler, backups, the restore drill, HTTPS through a Cloudflare tunnel on the
+free plan, and every CRM feature. No licence, no subscription, no per-user fee.
+
+**Not free, and not avoidable:** electricity for the server, the shop's internet
+connection, and eventually replacement hardware.
+
+**Optional extras, only if wanted:**
+
+| | Cost | Needed for |
+|---|---|---|
+| A domain name | ~₹1,000/year | A friendly address instead of an IP |
+| Resend (email) | Free tier, then paid | The daily digest emails **only** |
+| AWS S3 | Pennies/month | Off-site backups, if a USB drive is not wanted |
+| Vercel + Supabase Cloud | Subscription | The hosted upgrade in §1–§9 |
+
+**Email is optional infrastructure (§9).** With no `RESEND_API_KEY`, the digests
+do not send and nothing else changes: `/today`, the dashboard, overdue, missing
+next action and the SLA flags are all computed from the database and are fully
+usable. Do not build an SMTP server for this.

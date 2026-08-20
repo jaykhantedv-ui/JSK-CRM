@@ -1,0 +1,31 @@
+# Bring the CRM up when the office server boots (§12).
+#
+# Docker's own restart policy (`unless-stopped`) already restarts a crashed
+# container, but it does not start the stack after a power cut unless the Docker
+# daemon starts first and the compose project is known to it. This unit makes
+# boot deterministic: after Docker is ready, bring the stack up.
+#
+#   sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jsk-crm.service
+#
+# Edit WorkingDirectory below if the repository is not at /opt/jsk-crm.
+
+[Unit]
+Description=JSK CRM (Docker Compose stack)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/jsk-crm
+ExecStart=/opt/jsk-crm/deploy/start.sh
+ExecStop=/opt/jsk-crm/deploy/stop.sh
+# A cold boot after a power cut replays the WAL before Postgres accepts
+# connections, and the migration step waits for that.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

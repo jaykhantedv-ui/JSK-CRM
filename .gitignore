@@ -42,3 +42,15 @@ yarn-error.log*
 # misc
 .vercel
 *.tsbuildinfo
+
+# Self-hosting (ADR-019). production.env holds the database password, the JWT
+# secret, the service-role key and the backup passphrase — it must never be
+# committed. The .example alongside it is the committed template.
+/deploy/env/*.env
+!/deploy/env/*.env.example
+
+# Local backups, if the office server's backup directory is ever inside the repo.
+/backups/
+*.dump
+*.dump.enc
+*.dump.enc.sha256

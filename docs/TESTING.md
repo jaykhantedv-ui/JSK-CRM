@@ -342,7 +342,12 @@ The gate is behavioural, not numeric.
 | Integration / RLS | `management-scope` | 75 |
 | E2E | `management`, extended `smoke` | 12 scenarios (11 auth-gated, skipped here — ADR-018) |
 
-**Totals after the phase: 378 unit, 314 integration, 27 E2E passing with 24 auth-gated skips.**
+**Totals after that phase: 378 unit, 314 integration, 27 E2E passing with 24 auth-gated skips.**
+
+**Totals now, after the launch phase (2026-08-20): 506 unit, 425 integration, 60 E2E passing with
+32 auth-gated skips.** The launch phase added the demo-mode gate, the health probe and the
+office-server package; the skips are unchanged in kind — they need Supabase Auth, and every
+authorization rule they cover is proved in `tests/integration/` as the restricted role (ADR-018).
 
 ### Unit — every metric definition
 

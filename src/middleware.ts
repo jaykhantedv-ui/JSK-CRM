@@ -41,6 +41,22 @@ const PUBLIC_PATHS = ['/login', '/auth']
 const CRON_PREFIX = '/api/cron/'
 
 /**
+ * The health probe answers without a session (§11).
+ *
+ * Docker's HEALTHCHECK, systemd and `deploy/health.sh` all call `/api/health`
+ * with no cookie jar. Behind the session middleware it answered 401 to every one
+ * of them, so the container would have been marked unhealthy the moment it
+ * started and restarted forever — a liveness probe that requires you to be alive
+ * to pass it.
+ *
+ * Exempting it is safe because the route was written to be exempt: it returns a
+ * status, a duration and nothing else — no version, no hostname, no row counts,
+ * no Postgres error text — and it reads no business data. It probes with the
+ * anon key, which already ships in the browser bundle (CLAUDE.md §7).
+ */
+const HEALTH_PATH = '/api/health'
+
+/**
  * A fresh nonce per request (§23).
  *
  * 16 bytes of CSPRNG output. A nonce that repeats across responses is worth
@@ -64,7 +80,8 @@ export async function middleware(request: NextRequest) {
   // cookie to rotate on a machine-to-machine request.
   if (
     request.nextUrl.pathname === '/api/cron' ||
-    request.nextUrl.pathname.startsWith(CRON_PREFIX)
+    request.nextUrl.pathname.startsWith(CRON_PREFIX) ||
+    request.nextUrl.pathname === HEALTH_PATH
   ) {
     return NextResponse.next()
   }

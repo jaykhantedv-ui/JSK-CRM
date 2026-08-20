@@ -312,8 +312,11 @@ Bucket `crm-files`, **private**. Path convention `{entity_type}/{entity_id}/{uui
 - **Read.** `SELECT` requires **visibility of the parent entity**, checked by a policy function
   that parses the path prefix using the `can_read_*` helpers (H-12).
 
-**Storage is not built yet** — it belongs to the file-upload phase, and this environment cannot run
-Supabase Storage in any case (ADR-018). Nothing about it is implemented, and nothing pretends to be.
+**Storage is built** (migration `024_storage.sql`, `services/storage.service.ts`). Its bucket, its
+policies and its path-prefix visibility checks are in the schema and covered by
+`tests/integration/storage-authorization.test.ts`. What has **not** been exercised is Supabase
+Storage's own HTTP service, which this environment cannot run (ADR-018): the upload round trip
+itself is proved on the office server the first time a photo is attached.
 - **No public URLs.** Serve via signed URLs with a **60-second expiry**.
 - **Validation.** Max **10 MB**; MIME allow-list (`image/jpeg`, `image/png`, `image/webp`,
   `application/pdf`) verified by a **hand-rolled magic-byte signature check, not by extension**

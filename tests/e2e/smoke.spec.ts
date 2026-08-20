@@ -68,3 +68,30 @@ test('the CSV export route gives a signed-out visitor no data', async ({ page })
   expect(response.status()).toBe(401)
   expect(response.headers()['content-type'] ?? '').not.toContain('text/csv')
 })
+
+test('the health probe answers without a session', async ({ page }) => {
+  // Docker's HEALTHCHECK, systemd and deploy/health.sh all call this with no
+  // cookie jar (§11). Behind the session middleware it answered 401 to every one
+  // of them, so the container was marked unhealthy the moment it started and
+  // restarted forever — a liveness probe that required you to be alive to pass
+  // it. This test is here so that exemption cannot be quietly reverted.
+  const response = await page.request.get('/api/health')
+
+  // 503 is the healthy answer HERE: the smoke suite runs with no Supabase
+  // reachable (ADR-018), and the probe is supposed to say so rather than
+  // claim to be fine. What matters is that it ANSWERED — not 401, not a
+  // redirect to /login.
+  expect([200, 503]).toContain(response.status())
+
+  const body = await response.json()
+  expect(body).toHaveProperty('status')
+  expect(body).toHaveProperty('checks.database.status')
+
+  // A cached health check is a lie by the time it is read.
+  expect(response.headers()['cache-control'] ?? '').toContain('no-store')
+
+  // It must give an unauthenticated caller nothing to work with: no version, no
+  // hostname, no row counts, no Postgres error text (§13).
+  const text = JSON.stringify(body)
+  expect(text).not.toMatch(/postgres|password|localhost|127\.0\.0\.1|supabase|stack/i)
+})

@@ -32,7 +32,7 @@ now approved.
 | TODO-BD-01 | **Resolved** | *(none — no key created)* | Project stays optional for all opportunities |
 | TODO-BD-02 | **Resolved** | `high_value_threshold_paise` | `30000000` (₹3,00,000) — **changed from the ₹2,00,000 placeholder** |
 | TODO-BD-03 | **Resolved** | `account_dormancy_days`, `opportunity_dormancy_days`, `stage_stall_days` | Defaults retained; **`dormancy_days` is split into two keys** |
-| TODO-BD-04 | **Resolved** | `material_types` | No slab/lot entity in V1 |
+| TODO-BD-04 | **Resolved — amended 2026-08-20** | `material_types` | No slab/lot entity in V1; list seeded with a launch taxonomy |
 | TODO-BD-05 | **Resolved** | `owner_summary_schedule` | Daily, 19:00 Asia/Kolkata, via hourly trigger + in-route gate |
 | TODO-BD-06 | **Resolved — final** | `cities` | Erode District, Tamil Nadu — **the ten revenue taluks**, enumerated |
 | TODO-BD-07 | **Resolved** | *(enum + free text; no key)* | No products/SKU table in V1 |
@@ -101,6 +101,23 @@ now approved.
 - **How to change later.** If slab tracking is confirmed, add fields to `opportunities` or a new
   table. **Nothing built now blocks either path.**
 - **Decided by:** Project Owner · **Date:** 2026-08-19
+
+**Amendment — 2026-08-20 (launch QA).** Seeding the key as `[]` was correct about the *model* and
+wrong about the *ergonomics*. An autocomplete backed by an empty list offers nothing, so every
+salesperson types the category by hand and the free text fragments into "vitrified",
+"Vitrified tiles", "vit. tile" — the normalisation problem the controlled list exists to prevent.
+
+- **Decision.** Seed `material_types` with a starter taxonomy: Tiles · Marble · Granite ·
+  Sanitaryware · CP Fittings · Bathroom Accessories · Vitrified Tiles · Wall Tiles · Floor Tiles ·
+  Kitchen Sinks · Bathroom Fittings · Adhesives & Grouts.
+- **What is unchanged.** No slab entity, **no product catalogue, no SKU system**. This is a list of
+  strings backing an autocomplete that still accepts free text, and it remains editable at
+  `/settings` by OWNER and ADMIN without a deploy.
+- **How it ships.** Migration `030_material_types_seed.sql`, guarded `where value = '[]'` so an
+  admin's curated list is never overwritten and the migration is idempotent. 014 is applied and is
+  therefore never edited (CLAUDE.md §17, §21.2). The value appears in the settings seed and
+  nowhere else (CLAUDE.md §3).
+- **Decided by:** Project Owner · **Date:** 2026-08-20
 
 ### TODO-BD-05 — Owner summary: daily or weekly, and at what time?
 
@@ -1602,6 +1619,95 @@ the cost is paid on `/today` from a phone from the first thousand rows, and the 
 the codebase already uses. Rewriting the helpers' bodies instead of the policies — they are still
 called per row, so it treats the symptom. Materialising scope into a table — a cache to invalidate,
 and a twelfth table.
+
+---
+
+### ADR-033 — The office server: self-hosted Supabase in Docker on one machine
+
+**Status:** Accepted
+**Date:** 2026-08-20   **Decided by:** Project Owner
+
+**Context.** V1 was designed for Vercel plus Supabase Cloud (§17.1) and that
+architecture is sound. What changed is the constraint: the business asked for a
+launch with **no recurring infrastructure cost**, running on a PC already sitting
+in the office. A second constraint made it urgent — this environment cannot reach
+Supabase Cloud, Vercel, Resend or AWS at all (§20), so "deploy to production and
+see" was never available to verify against.
+
+The cheap answer would have been to swap the platform: drop Supabase, hand-roll
+auth, put the API in the Next.js app. That would have thrown away **the
+authorization model**. RLS is the security boundary in this product (CLAUDE.md
+§6): every policy, and the 425 integration tests that prove them, assume
+PostgREST executing a request as the caller's role. Replacing that means
+rewriting the security model and re-earning the confidence, for a hosting bill.
+
+**Decision.** **Keep the architecture; change only where it runs.** Self-host the
+open-source Supabase components on one office server with Docker Compose:
+
+| | |
+|---|---|
+| `db` | `supabase/postgres` — the same extensions and roles as hosted |
+| `auth` | GoTrue — the same sign-in, the same JWTs |
+| `rest` | PostgREST — **the same RLS enforcement** |
+| `storage` | `storage-api` — the same 10 MB uploads (§15.6) |
+| `gateway` | nginx, putting the three behind one origin |
+| `app` | the Next.js application, unchanged |
+
+Nothing in `src/` changed to make this work. `NEXT_PUBLIC_SUPABASE_URL` points at
+the office server instead of `*.supabase.co`, and every server component, Server
+Action, service and policy behaves exactly as it did — because it is the same
+PostgREST, running the same migrations, enforcing the same policies.
+
+Three substitutions were required, each replacing a **paid platform feature** with
+something the server already has:
+
+1. **Vercel Cron → systemd timers.** The five `/api/cron/*` routes are unchanged,
+   still authenticated by `CRON_SECRET`. `deploy/run-cron.sh` curls them from
+   localhost; the timers reproduce `vercel.json`'s schedules exactly, in UTC. No
+   queue was added (§3).
+2. **Vercel's edge TLS → Cloudflare Tunnel.** Outbound-only, so no port is
+   forwarded and Postgres, GoTrue, PostgREST and Storage are bound to
+   `127.0.0.1`. HTTPS terminates at Cloudflare's edge on the free plan. On the
+   LAN it is not needed at all.
+3. **S3 backups → local + external drive.** `scripts/backup.sh` already supported
+   a `file://` destination, so this needed no new format: same custom-format
+   `pg_dump`, same AES-256 with a decrypt check before publish, same
+   `verify-restore.sql`. `deploy/backup.sh` runs `pg_dump` **inside** the db
+   container so the server needs no Postgres client, then copies to the external
+   drive and prunes to the retention window.
+
+**Consequences.**
+
+*Easy.* ₹0/month recurring. The whole stack is one `deploy/start.sh`. Development
+and production run the same images, so "works on my machine" stops being a
+category of bug. Backups are the business's own files, readable with `openssl`
+and `pg_restore` and nobody's cooperation.
+
+*Hard.* One machine is one machine: a dead disk is an outage until it is replaced,
+and the answer is the tested restore, not a second server (§12 explicitly rejects
+HA at this scale). The owner now owns the operating system — updates, disk, UPS.
+Cloudflare's free plan is a dependency for remote access, though the LAN keeps
+working without it and the tunnel can be swapped without touching the application.
+
+*What must change.* `docs/DEPLOYMENT.md` carries both paths — hosted and office
+server — and the hosted one is now the *optional upgrade*, not the default.
+
+**Alternatives considered.**
+
+- **Stay on Vercel + Supabase Cloud.** Rejected on cost, and unverifiable from
+  here (§20). Retained as a documented upgrade path — the migrations, the schema
+  and the application are identical, so moving is a data restore and an
+  environment change.
+- **Drop Supabase; hand-roll auth and the data API.** Rejected. It discards RLS as
+  the authorization boundary and the entire integration suite that proves it —
+  the most valuable tests in the project (§19.2) — to save a subscription.
+- **Kong, as upstream Supabase uses.** Rejected as more gateway than a two-outlet
+  business needs. nginx routes three prefixes in forty lines, holds no policy and
+  terminates no TLS.
+- **Caddy for HTTPS.** Rejected: the tunnel already terminates TLS at the edge, so
+  Caddy would be a second certificate story with nothing to do (§8).
+- **Kubernetes, or a second server for HA.** Rejected outright (§3, §12). Twenty
+  users on one PC with a tested restore is the correct amount of machinery.
 
 ---
 

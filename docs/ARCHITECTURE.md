@@ -358,6 +358,45 @@ policies, and PostgREST request handling. See `/docs/SETUP.md`.
 
 ---
 
+## 12b. Where it runs (ADR-033)
+
+The application is **deployment-agnostic by construction**, and that is the whole
+reason self-hosting cost nothing architecturally.
+
+Everything in `src/` talks to Supabase through `NEXT_PUBLIC_SUPABASE_URL`. Point
+that at `*.supabase.co` and it is the hosted deployment; point it at the office
+server's gateway and it is self-hosted. **Not one line under `src/` changed to
+support the office server** — same PostgREST, same migrations, same policies, same
+JWT verification.
+
+```
+                     ┌──────────────────────────────────┐
+   browser  ──────▶  │  app        Next.js              │
+                     │  gateway    nginx  :54321        │
+                     │    /auth/v1/    ──▶ auth         │
+                     │    /rest/v1/    ──▶ rest  ← RLS  │
+                     │    /storage/v1/ ──▶ storage      │
+                     │  db         PostgreSQL           │
+                     └──────────────────────────────────┘
+                        one office PC, Docker Compose
+   systemd timers ──▶ /api/cron/*        (was Vercel Cron)
+   cloudflared    ──▶ outbound tunnel    (was Vercel edge TLS)
+```
+
+Three platform features were substituted, each by something the machine already
+has: **Vercel Cron → systemd timers** (same routes, same `CRON_SECRET`),
+**Vercel's edge TLS → Cloudflare Tunnel** (outbound only, nothing exposed
+inbound), and **S3 backups → local plus an external drive** (same encrypted
+format, same verified restore).
+
+The gateway exists for one reason: `@supabase/supabase-js` takes a single base URL
+and appends `/auth/v1`, `/rest/v1` and `/storage/v1`, so something must route
+three prefixes to three containers. It terminates no TLS and enforces no
+authorization — **RLS in the database remains the only authorization boundary**
+(§15), exactly as it is on hosted Supabase.
+
+---
+
 ## 13. Architectural invariants
 
 These do not change without approval recorded in `/docs/DECISIONS.md` (§17.1, `CLAUDE.md` §17):

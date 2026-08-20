@@ -263,6 +263,37 @@ still to be confirmed and is a §23.9 launch gate.
 
 ---
 
+## 8a. Demo / training data
+
+`dev-fixtures.sql` (above) is shaped for the RLS tests: three outlets, a handful of
+records, deliberately awkward permission cases. It is **not** something to demo.
+
+For a realistic system — 20 users, 2 outlets, 40 customers, 20 projects, 60
+opportunities across every stage, 240 activities, and work that is already
+overdue, due today, missing a next action, stalled and dormant:
+
+```bash
+scripts/demo.sh                       # rebuilds the database, then seeds it
+NEXT_PUBLIC_DEMO_MODE=1 npm run dev   # the DEMO / TRAINING DATA banner needs this
+```
+
+Sign in as `owner@demo.jsk.local`, `admin@demo.jsk.local`,
+`manager.a@demo.jsk.local` or `sales01@demo.jsk.local` … `sales16@`. The script
+prints the password; override it with `DEMO_PASSWORD=…`.
+
+Two things keep this data unmistakable: every id begins `dd…` and every login is
+`@demo.jsk.local`, so one query separates demo rows from real ones; and with
+`NEXT_PUBLIC_DEMO_MODE=1` an orange banner sits above every screen, including the
+login page. **It is off unless the variable is exactly `'1'`** — there is a unit
+test for that, because a demo banner is only useful if it cannot appear in
+production and, more importantly, cannot fail to appear in a demo.
+
+`scripts/demo.sh` resets the database before seeding, so re-running it is a
+rebuild rather than a mutation — which is why the demo data needs no delete
+statements and the no-hard-delete rule stays intact (CLAUDE.md §11).
+
+---
+
 ## 9. Before you write code
 
 1. Read `CLAUDE_CODE_BUILD_SPEC.md` end to end. It is the source of truth.

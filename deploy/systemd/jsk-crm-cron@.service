@@ -1,0 +1,17 @@
+# One scheduled job. Templated: the instance name is the job.
+#
+#   systemctl start jsk-crm-cron@maintenance.service
+#   journalctl -u jsk-crm-cron@maintenance.service
+#
+# Failure is visible in `systemctl list-timers` and the journal. There is
+# deliberately no alerting stack behind it (§11).
+
+[Unit]
+Description=JSK CRM scheduled job: %i
+After=jsk-crm.service
+Requires=jsk-crm.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jsk-crm
+ExecStart=/opt/jsk-crm/deploy/run-cron.sh %i

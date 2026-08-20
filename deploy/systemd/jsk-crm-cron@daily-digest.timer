@@ -1,0 +1,20 @@
+# Salesperson daily digest (§14.3)
+#
+# Schedule is UTC, matching vercel.json exactly so the office server and the
+# hosted deployment fire at the same moment: *-*-* 03:00:00 UTC = 08:30 IST.
+#
+# Persistent=true runs a job that was missed because the server was off — a
+# power cut at 02:00 must not silently skip the night's maintenance.
+
+[Unit]
+Description=JSK CRM timer: daily-digest
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+# Twenty users on one server: a little jitter keeps two jobs off the same second.
+RandomizedDelaySec=60
+Unit=jsk-crm-cron@daily-digest.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+# 21:00 UTC = 02:30 IST — after the nightly maintenance sweep at 02:00 IST, so
+# the backup captures the day's dormancy state rather than yesterday's.
+
+[Unit]
+Description=JSK CRM nightly backup timer
+
+[Timer]
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=jsk-crm-backup.service
+
+[Install]
+WantedBy=timers.target
