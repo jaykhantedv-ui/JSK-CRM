@@ -1,0 +1,13 @@
+-- Seed data for EVERY environment, including production.
+--
+-- Deliberately empty. The only data V1 needs in every environment is
+-- `system_settings`, and §5.12 puts those rows in migration 014 so they arrive
+-- with the table and can never be missing from a freshly migrated database.
+--
+-- Outlets, users and business records are NOT seeded here: outlets are business
+-- data the OWNER creates, and users are provisioned through the OWNER/ADMIN
+-- Server Action (§3.2, ADR-009). Nothing that ships to production may invent
+-- either (CLAUDE.md §15).
+--
+-- Development-only data lives in dev-fixtures.sql and never runs against staging
+-- or production.

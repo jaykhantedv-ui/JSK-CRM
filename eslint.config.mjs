@@ -25,6 +25,12 @@ const FEATURES = [
   'activities',
   'dashboard',
   'import',
+  // Added in Master Phase 4. `management` shipped in Phase 3 without a boundary
+  // entry, so §18's rule was not being enforced on it; `archive` and `settings`
+  // arrive with this phase.
+  'management',
+  'archive',
+  'settings',
 ]
 
 const featureBoundaries = FEATURES.map((feature) => ({
@@ -66,6 +72,11 @@ const featureBoundaries = FEATURES.map((feature) => ({
  */
 const ADMIN_CLIENT_PERMITTED_CALLERS = [
   'src/app/api/cron/**/*.{ts,tsx}',
+  // The cron execution path. ADR-009 permits "cron routes"; CLAUDE.md §8 requires
+  // the business logic to live in a service rather than in the route handler, so
+  // the permitted caller is the service the routes call. The routes themselves
+  // stay thin: authenticate, call, map.
+  'src/services/automation.service.ts',
   'src/services/import.service.ts',
   'src/services/user.service.ts',
 ]
@@ -93,6 +104,25 @@ const adminClientBoundary = [
   },
 ]
 
+/**
+ * `_previous` is the convention this repository already uses for a Server Action's
+ * unused `prevState` argument, which `useActionState` requires in the signature.
+ * The default `after-used` rule only complains when such an argument is LAST —
+ * which it is for any action bound with `.bind(null, id)` — so the same name was
+ * silent in some files and an error in others. One rule, applied consistently.
+ */
+const unusedArgs = [
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'warn',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
+      ],
+    },
+  },
+]
+
 const eslintConfig = [
   {
     ignores: [
@@ -107,6 +137,7 @@ const eslintConfig = [
   ...compat.extends('next/core-web-vitals', 'next/typescript'),
   ...featureBoundaries,
   ...adminClientBoundary,
+  ...unusedArgs,
 ]
 
 export default eslintConfig

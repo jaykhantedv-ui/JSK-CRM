@@ -5,6 +5,12 @@
 **Decisions:** `/docs/DECISIONS.md` — **all 12 `TODO-BD` items resolved**, **14 ADRs** accepted,
 5 product decisions (C-1 … C-5).
 
+**Status: Master Phase 1 (platform foundation) and Master Phase 2 (Core CRM) are built.**
+Master Phase 2 delivered accounts, contacts, projects, opportunities, the pipeline, activities,
+next actions, global search, advisory duplicate detection and the mobile/desktop CRM screens —
+migrations 018–020, the seven CRM services, and 50 new unit plus 85 new integration tests. See the
+phase report and `/docs/TESTING.md` for the current suite state.
+
 **Status: this plan reflects the approved decisions of 2026-08-19 (Project Owner).**
 All ten blockers, all thirteen HIGH findings, all thirty MEDIUM findings and all five follow-on
 questions are closed. **The Decision Gate's criteria are met.** The plan is ready for
@@ -278,10 +284,17 @@ network policy; configure alternate registries to evade the restriction; claim a
 steps succeeded; write Phase 3 migrations to compensate for the missing database; or provision
 staging or production through an unverified path.
 
-### Phase 3 entry condition
+### Phase 3 entry condition — MET (ADR-018)
 
 **Phase 3 must not start until the local Supabase stack runs successfully in a networked
 environment, or an equivalent approved verification environment is available.**
+
+**An equivalent environment was established on 2026-08-19 and the condition is met.** The Supabase
+container registry is denied by the environment's egress policy, so `supabase start` cannot run;
+the approved alternative is a **real PostgreSQL 16 server** with the platform bootstrap in
+`supabase/platform/`, migrations applied by the Supabase CLI over `--db-url`, and types generated
+by `@supabase/postgres-meta`. See **ADR-018**. The migrations have since been applied cleanly from
+empty **twice in a row** and are covered by 154 integration tests.
 
 Phase 3 writes seventeen migrations whose acceptance criterion is *"`supabase db reset` applies
 the full sequence cleanly to an empty database, twice in a row"*. Writing migrations that cannot
@@ -290,10 +303,8 @@ shared environment (§21.2), so a defect introduced blind becomes a permanent se
 rather than an edit. §21's definition of done is explicit: *migrations applied* and *tests
 passing*, not *migrations written*.
 
-`src/types/database.types.ts` is **deliberately absent**. Generating it requires a live
-database, and fabricating one by hand would put invented tables into a file whose whole
-purpose is to mirror the real schema (`CLAUDE.md` §15). It lands with the first migration
-in Phase 3.
+`src/types/database.types.ts` **now exists**, generated from the verified database. It is never
+hand-written and never hand-edited — regenerate it instead.
 
 **Resolved during review — `server-only` declined**
 
@@ -305,8 +316,54 @@ approved as sufficient: (1) the runtime browser guard on module evaluation and o
 
 ---
 
+# ★ Master Phase 1 — Platform foundation (2026-08-19)
+
+A consolidated pass covering the original Phases 3–6: the database, authentication, the outlet
+model, RLS, the shared service layer and generated types. **No CRM feature screens.**
+
+| Deliverable | State |
+|---|---|
+| Real database runtime | ✅ PostgreSQL 16 + platform bootstrap (ADR-018) — Docker registry blocked |
+| Migrations 001–017 | ✅ applied cleanly from empty, twice |
+| `src/types/database.types.ts` | ✅ generated from the verified database |
+| Outlet model | ✅ `outlets` + `user_outlets` + `outlet_id`; `branch` retired (ADR-016) |
+| Authentication | ✅ email/password, SSR sessions, no self-registration, role-aware routing |
+| RLS and permissions | ✅ 39 policies, one DELETE policy, outlet scope enforced at the boundary |
+| Core services | ✅ errors · money · dates · phone · validation · permissions · transitions · settings · auth · user · outlet |
+| Tests | ✅ 232 unit · 154 integration/RLS · 8 E2E smoke |
+| Gate | ✅ typecheck · lint · build · bundle check all clean |
+| Hosted Supabase verification | ⛔ **blocked** — egress policy denies `api.supabase.com`; no account attached. See `/docs/DEPLOYMENT.md` §0 |
+
+**P1-05 — closed.** `opportunity_events.created_at` defaults to `clock_timestamp()` (**ADR-019**),
+so events written in one transaction stay orderable. Covered by three regression tests.
+
+**Open, needing infrastructure — the one remaining blocker.** Hosted verification could not run:
+the Supabase control plane and data plane are both denied by this environment's egress policy, and
+no account is attached. Supabase Auth, PostgREST, Storage and the live SSR session path are
+therefore **unverified**. Attempted with official tooling only; nothing was bypassed. Full detail
+and the steps to close it are in `/docs/DEPLOYMENT.md` §0.
+
+**Not started:** every CRM feature screen, dashboards, reports, import, file uploads, cron and
+notification automation. Those are Master Phases 2–5.
+
+---
+
 # Phase 3 — Database migrations and database helpers
 
+> ## ✅ BUILT — Master Phase 1, 2026-08-19
+>
+> Seventeen migrations, applied cleanly from empty twice in a row against a real PostgreSQL 16
+> server (ADR-018). Two defects were found by executing them and fixed before anything shipped:
+> the audit trigger's `CASE` resolved to `text` and would have rejected **every** stage change,
+> and `guard_record_scope()` fired for service-role callers that already bypass RLS. Both are
+> recorded in `/docs/DATABASE.md`.
+>
+> **Deviations, each with an ADR recorded before the migration was written:** `outlets` and
+> `user_outlets` replace `branch` (ADR-016, thirteen tables); ADMIN loses automatic business-data
+> visibility (ADR-017).
+>
+> The original blocking note is preserved below as the record of why it was blocked.
+>
 > ## ⛔ BLOCKED — do not start
 >
 > Phase 3 requires a working local Supabase stack: its acceptance criterion is that
@@ -443,6 +500,14 @@ a new migration, not an edit.
 
 # Phase 4 — Authentication and users
 
+> **✅ BUILT — Master Phase 1, 2026-08-19.** Email/password sign-in, SSR sessions refreshed in
+> middleware, role-aware landing (`/today`, `/dashboard`, `/settings`), no self-registration
+> anywhere, and OWNER/ADMIN provisioning through `user.service.ts` with the authorization check
+> **before** the admin client (ADR-009). A deactivated user is refused at the database boundary,
+> not only at login: every policy resolves ownership through `current_user_id()`, which filters on
+> `is_active`, so a token issued before deactivation buys nothing.
+> **Not verified here:** Supabase Auth's own behaviour, including C-5 login throttling (ADR-018).
+
 **Spec phase:** 1 Foundation · **Spec sections:** §3.2, §5.2, §12.2, §15.3, §15.8, §17.2
 
 **Objective.** Email/password login via Supabase Auth, httpOnly cookie sessions via
@@ -493,6 +558,11 @@ configured limits, which are recorded in `/docs/DEPLOYMENT.md` once the projects
 ---
 
 # Phase 5 — RLS and permissions
+
+> **✅ BUILT — Master Phase 1, 2026-08-19.** 39 policies across 13 tables, **one** DELETE policy
+> (`project_stakeholders`, ADR-004), RLS enabled in each table's own migration (H-04), and outlet
+> scope enforced at the database boundary (ADR-016). 154 integration tests, every one asserted
+> **as the restricted role**.
 
 **Spec phase:** 1–5 (written per table), audited in 8 · **Spec sections:** §3.1, §3.2, §15 (all), §19.2
 
@@ -554,6 +624,12 @@ remain the main threat to §12.8's 400 ms budget; measure here, not in Phase 20.
 ---
 
 # Phase 6 — Core services and business logic
+
+> **✅ FOUNDATION BUILT — Master Phase 1, 2026-08-19.** The error contract, Zod conventions, money,
+> phone, dates, permissions, the full transition matrix, and the settings, auth, user and outlet
+> services. The account, contact, project, opportunity, activity, dashboard and import services
+> arrive with their features — they were deliberately **not** written ahead of the screens that
+> use them.
 
 **Spec phase:** 2–7 (foundation laid here) · **Spec sections:** §16 (all), §17.2, §17.3, §18, §8.11
 
@@ -1126,6 +1202,42 @@ reaching its counter update leaves the state stale — the update belongs in a `
 
 ---
 
+## As built — Master Phase 4 (Phases 15–18), implemented 2026-08-20
+
+**What shipped.** Import, archive/restore, merge, private file storage, five cron routes and the
+Resend notification implementation, plus the operational settings screen. Five new migrations
+(023–027), five new services, and 190 new tests.
+
+| Phase | Delivered |
+|---|---|
+| **15 — Import** | Upload → validate → preview → duplicate analysis → per-row decision → atomic import → result → 7-day rollback. Accounts and contacts only (TODO-BD-10). OWNER/ADMIN; 5 MB / 5,000 rows. ADR-012's atomicity kept and live progress dropped. |
+| **16 — Archive and merge** | C-3's four steps as one operation: `archive_account` stamps the account and its opportunities, projects and contacts with **one shared instant**, which is what lets `restore_account` reverse exactly that operation and nothing else. Manual merge, MANAGER/OWNER, with ADR-008's irreversibility stated plainly and a typed confirmation. `/archive` screen. |
+| **17 — Storage** | Private `crm-files` bucket; **the path prefix is the authorization key**, enforced by policies on `storage.objects`. Signed upload URL issued only after a server-side visibility check (ADR-005); 60-second read URLs; hand-rolled magic-byte check (M-14). Site-visit photos and quotation PDFs. |
+| **18 — Cron and email** | Five routes with `CRON_SECRET`, the `/api/cron/*` middleware exemption, ADR-011's hourly-trigger-plus-in-route-gate for the owner summary, ADR-014's failure state, and `run_maintenance` with the H-09 rollback-window exclusion. |
+
+**Decisions taken during implementation.** ADR-025 … ADR-030 in `/docs/DECISIONS.md`.
+
+**Defects found and fixed.**
+
+| Defect | Fix |
+|---|---|
+| `contacts` had none of `is_imported`, `legacy_ref`, `import_batch_id`, so §20.6 rollback could not find an imported contact | Migration `026`, per H-03 |
+| `v_opportunity_flags` is defined `select o.*`, and PostgreSQL expands that star at creation — a column added later never appears in the view, silently | The view is recreated in the same migration that adds `quotation_file_paths` (`024`) |
+| `src/features/management` was missing from the §18 ESLint feature-boundary list since Phase 3 | Added, with `archive` and `settings` |
+| `_previous` was an error in some files and silent in others (the rule reports an unused argument only when it is last) | One `argsIgnorePattern` rule, applied consistently |
+
+**Verified at completion.** 482 unit · 403 integration/RLS · 59 E2E passing with 32 explicitly
+skipped · typecheck, lint and production build clean · service-role bundle grep clean · database
+reset from empty twice · generated types byte-identical on regeneration.
+
+**Still unverified — the same environment limitation as Phase 2.** Hosted Supabase Auth,
+PostgREST and Storage. The egress policy blocks the container images and `api.supabase.com`
+(ADR-018). Master Phase 5 owns that verification. Nothing here claims otherwise: the 32 skipped
+E2E specs name the reason in their skip message, and every rule they cover is proved against a
+real PostgreSQL server in the integration suite.
+
+---
+
 # Phase 19 — Complete testing
 
 **Spec phase:** 8 Security & QA · **Spec sections:** §19 (all), §23.8
@@ -1271,3 +1383,136 @@ single action in the project.
 | Maintenance counters treated as tunable settings (ADR-014) | 3, 18 | Operational state, written only by the cron route, never editable at `/settings` |
 | Audit events blurred into activities (C-1) | 11 | Visually and semantically distinct in the timeline; §10.1 keeps them separate |
 | Export bypassing RLS scope (C-2) | 14, 20 | Export runs the same scoped query as the screen; ADMIN rejected server-side |
+
+
+---
+
+# As built — Master Phase 3, management intelligence, implemented 2026-08-20
+
+Master Phase 3 is the management and reporting layer. It covers §13.3, §13.4 and §16 of the
+specification, plus the reporting surfaces the Master Phase 3 brief adds beyond it.
+
+## Delivered
+
+| Item | Detail |
+|---|---|
+| Migration 021 | `sales_targets` — the fourteenth table, approved as **ADR-021** before it was written |
+| Migration 022 | Thirteen SECURITY INVOKER aggregate RPCs plus `assert_management_access()` and `scoped_outlet_ids()` (**ADR-022**) |
+| `lib/metrics.ts` | Every metric definition, once, pure and unit-tested |
+| `lib/period.ts` | Reporting periods resolved to Asia/Kolkata instants, end exclusive |
+| `lib/csv.ts` | CSV with rupee conversion and formula-injection neutralisation |
+| Four services | `analytics`, `team`, `target`, `export`; `dashboard.service.ts` extended with the two composite dashboards |
+| `/dashboard` | Rewritten — §13.3 for MANAGER, §13.4 for OWNER, chosen by role |
+| `/team`, `/team/:userId` | Workload and per-person detail |
+| `/reports` + eleven reports | Pipeline · won/lost · salespeople · lost reasons · site visits · conversion · at-risk · customers · projects · branches · targets |
+| `/api/export/[dataset]` | Eleven datasets, server-authorised, bounded |
+| Navigation | `/reports` added to the role-gated sidebar (it was missing) |
+
+## Verification
+
+| Check | Result |
+|---|---|
+| `npm run typecheck` | Clean |
+| `npm run lint` | Clean, zero warnings |
+| `npm run test` (unit) | **378 passed** (282 before, 96 added) |
+| `npm run test:integration` | **314 passed** (239 before, 75 added) |
+| `npm run test:e2e` | **27 passed, 24 skipped** — the skips need Supabase Auth (ADR-018) |
+| `npm run build` | Clean. Management screens 118 kB first load against a 103 kB shared baseline |
+| `npm run check:bundle` | No service-role key or reference in the client bundle |
+| Migrations from empty | Applied cleanly, repeatedly, with `FIXTURES=1 scripts/db.sh reset` |
+| "Revenue" in the UI | Absent. The only matches anywhere are `revenue taluks` — the Tamil Nadu administrative term — in two code comments |
+
+## Defects found and fixed during the phase
+
+Each was caught by a test or a smoke check rather than by inspection, which is the point of running
+them continuously.
+
+1. **The management gate silently disabled every query.** `assert_management_access()` returned
+   `void`, and the RPCs used it as `... and public.assert_management_access() is null`. In
+   PostgreSQL `void IS NULL` is **false**, so every WHERE clause was unsatisfiable and every report
+   returned zero rows for everybody. Found by a manual smoke query against the fixtures immediately
+   after the migration applied — the gate was never reached, so no test would have failed on
+   permissions. Fixed by making the gate an unconditional `perform` on the first line of a
+   `plpgsql` body, which is also the correct shape for a security control (ADR-022).
+
+2. **`percentile_cont` returns double precision, not numeric.** `management_quotation_turnaround`
+   declared `median_days numeric` and failed at call time with "structure of query does not match
+   function result type" — at call time, not creation time, so the migration applied cleanly and
+   the function was broken. Found by the integration suite. Fixed with an explicit cast.
+
+3. **A blanket function grant re-opened a privilege migration 018 had closed.** Migration 022 ended
+   with `grant execute on all functions in schema public to authenticated`, which re-granted EXECUTE
+   on the SECURITY DEFINER trigger functions 018 deliberately revoked. Caught by the Phase 2 contract
+   test `the trigger functions added in 018 are not callable by anybody directly`. Fixed by granting
+   function by function. Migration 021 carried the same mistake on `guard_target_scope()` and was
+   fixed with it.
+
+4. **The lost-reason drill-down filtered after pagination.** It paginated every lost enquiry and then
+   discarded rows that did not match the selected reason, giving half-empty pages and a page count
+   that counted records the user could not see. Fixed by adding `lostReason` as a first-class filter
+   on `listOpportunities`, alongside stage and category.
+
+5. **An unauthenticated API request was answered with a 200 HTML page.** The middleware redirected
+   `/api/export/…` to `/login`; a caller following the redirect received the login page as HTML with
+   status 200, which a download script would write into a `.csv` file. Found by the smoke assertion
+   "a signed-out visitor gets no data". Fixed: `/api/*` now answers **401 JSON** (ADR-024).
+
+## Deviations from the specification, with reasons
+
+| Deviation | Reason |
+|---|---|
+| A fourteenth table, `sales_targets` | §10 of the brief requires targets; the spec has no target concept. `system_settings` is world-readable to authenticated users by design and would have published the company target to every salesperson. **ADR-021** |
+| The §13.4 trend chart is inline SVG, not Recharts | Recharts is in the frozen stack and needs no approval; this records the decision not to use it for a twelve-point polyline that would otherwise ship a charting runtime to a phone. **ADR-023** |
+| `/reports/targets` is a new sub-route | §12.2 lists `/reports` for MANAGER/OWNER. Targets are management data, so `/settings` — which MANAGER cannot reach and ADMIN can — was the wrong home. Follows the C-4 pattern of explicit routes |
+| Export refuses above 1,000 rows rather than truncating | `max_rows` in `supabase/config.toml` is where PostgREST silently truncates. A partial export that looks complete is the failure mode worth refusing |
+
+## Open items for Master Phase 4
+
+- **`/api/cron/*` needs a middleware exemption.** Cron routes authenticate with a shared secret
+  rather than a session (§14.7), so the 401 added by ADR-024 will block them. They do not exist yet
+  — Phase 3 does not build cron (§22) — and the behaviour is unchanged from Phase 2, which
+  redirected them. Recorded so it is not met as a mystery.
+- **Hosted Supabase remains unverified** (ADR-018). Eleven E2E scenarios are written and skipped with
+  a stated reason; they run against a real project with `E2E_SUPABASE_READY=1`. Every scope rule in
+  them is separately proved at the database level.
+- **No performance benchmark against a large dataset.** The brief explicitly declines synthetic
+  20,000-opportunity infrastructure. The queries are aggregated in SQL, bounded and paginated, and
+  the dashboard issues one round trip per block concurrently; that is a design argument rather than
+  a measurement, and it is stated as one.
+
+---
+
+## Master Phase 5 — production readiness (2026-08-20)
+
+### Done
+
+| | |
+|---|---|
+| Repository | Fast-forwarded onto the complete Phase 1–4 history. The working branch held only the scaffolding commit; the Phase 4 work was on `claude/lucid-curie-m3mfxn`, a strict descendant, so this was a fast-forward — no history rewritten, nothing discarded |
+| Database | 29 migrations from empty **twice**, byte-identical schema; generated types byte-identical to the live database; exactly **one** DELETE policy, on `project_stakeholders` |
+| Security headers | `lib/security-headers.ts`, nonce-based CSP in middleware, static headers in `next.config.ts` (ADR-031) |
+| Performance | Thirteen RLS policies moved from per-row to per-query evaluation (ADR-032, migrations 028/029) |
+| Backup | `scripts/backup.sh`, `scripts/restore.sh`, `scripts/verify-restore.sql`, `.github/workflows/backup.yml` — **restore drilled and passed** |
+| CI/CD | `ci.yml`, `deploy.yml`, `backup.yml`, `scripts/smoke.sh` |
+| Data quality | `scripts/data-quality.sql` — read-only, reports, never mutates |
+| Docs | README · ARCHITECTURE · DATABASE · PERMISSIONS · TESTING · DEPLOYMENT · DECISIONS · SPEC_AUDIT · new RUNBOOK |
+
+### Not done, and why
+
+Everything requiring a hosted account. The environment's egress policy answers **403 to CONNECT**
+for `api.supabase.com`, `supabase.co`, `api.vercel.com` and `api.resend.com`, and no token for any
+of them is attached. No restriction was bypassed.
+
+| Blocked | Needs |
+|---|---|
+| Supabase staging + production in `ap-south-1` | A Supabase account and `SUPABASE_ACCESS_TOKEN` |
+| Hosted Auth, PostgREST and Storage verification | The above, then the §0 checklist in DEPLOYMENT.md |
+| Real-Auth E2E (91 tests, written, self-skipping) | The above, then `E2E_SUPABASE_READY=1` |
+| Vercel project, env vars, cron | A Vercel account and `VERCEL_TOKEN`; hourly cron needs a paid plan |
+| Resend sender and real digests | A Resend account, `RESEND_API_KEY` and `RESEND_FROM_EMAIL` |
+| S3 bucket, IAM, lifecycle retention | A business-owned AWS account in `ap-south-1` |
+| 20 production users, 2 outlets, geography | The Supabase project, then §32–§33 |
+| Business UAT and production import | All of the above |
+
+**This is the last development phase.** What remains is provisioning and the business's own
+acceptance run, both of which need a human with accounts.

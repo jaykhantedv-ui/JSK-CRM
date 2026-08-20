@@ -107,7 +107,8 @@ features/       feature modules: components, hooks, schemas
   └─ MUST NEVER import from another feature folder (§18) — enforced by lint (M-30)
 services/       ALL business logic. One rule, one place.
   └─ throws AppError; calls lib/supabase/server or an RPC
-lib/            supabase clients · money · phone · dates · errors · permissions · transitions
+lib/            supabase clients · money · phone · dates · errors · permissions · validation
+                opportunity/transitions
 types/          database.types.ts (generated) · domain.ts
 ```
 
@@ -116,7 +117,12 @@ stage transition is legal, whether a value is high-value, or who may reassign.
 
 **`settings.service.ts` is the only reader of `system_settings`.** Resolving the twelve `TODO-BD`
 items fixed the *values*; it did not licence a constant. `30000000` (the approved high-value
-threshold) must never appear as a literal anywhere.
+threshold) must never appear as a literal anywhere. Reads are wrapped in React's `cache`, so one
+request reads the table once however many components ask — no cache infrastructure, per §17.1.
+
+**Built in Master Phase 1:** `settings`, `auth`, `user` (provisioning, ADR-009) and `outlet`
+(ADR-016) services, plus the shared `lib/*` foundation. The account, contact, project,
+opportunity, activity, dashboard and import services arrive with their features.
 
 ---
 
@@ -127,6 +133,11 @@ threshold) must never appear as a literal anywhere.
 | `lib/supabase/client.ts` | anon | Browser components (reads, and the ADR-005 signed-URL upload) | Applies |
 | `lib/supabase/server.ts` | anon + user session | Server Components, Server Actions, services | **Applies** |
 | `lib/supabase/admin.ts` | **service-role** | Cron routes · the import executor · **user provisioning (ADR-009)** | **Bypassed** |
+
+All three are typed against the generated `Database`, so a query naming a column that does not
+exist fails `tsc` rather than at runtime. That is not cosmetic: it is what caught the ambiguous
+`user_outlets` embed — the table references `users` twice, as the member and as `created_by`, so
+the embed needs an explicit foreign-key hint.
 
 - The **anon key** is safe to expose. RLS is what protects the data.
 - The **service-role key must never be imported into any file under `app/` that ships to the
@@ -147,15 +158,26 @@ Multi-table writes use a **Postgres RPC** rather than sequential client calls.
 | RPC | Security | Writes |
 |---|---|---|
 | `create_account_with_opportunity` | INVOKER | account → opportunity → activity (+ the `CREATED` event via trigger) |
-| `log_activity` | INVOKER | activity → `accounts.last_activity_at` → `opportunities.last_activity_at` → next-action decision |
+| `log_activity` | INVOKER | activity → next-action decision. The two `last_activity_at` columns are maintained by a trigger (ADR-020), not written here |
 | `change_opportunity_stage` | INVOKER | opportunity update (+ the stage event via trigger, reason via GUC) |
-| **`reassign_opportunity`** | **DEFINER** | `owner_id` — checks **`can_reassign()`** itself (ADR / B-02, H-05) |
-| `bulk_reassign` | **DEFINER** | many opportunities, same gate |
+| `reassign_opportunity` | INVOKER | `owner_id` + the `OWNER_CHANGED` event with its reason |
+| `bulk_reassign` | INVOKER | many opportunities, same policy |
 | `execute_import` | service-role | the whole batch, atomically (ADR-012) |
 
-`SECURITY INVOKER` is the default so RLS still applies. The two `DEFINER` exceptions exist because
-the table policy denies `owner_id` changes outright — §15.5 itself states *"Prefer the RPC — it is
-easier to test and audit."*
+**Every RPC is `SECURITY INVOKER`, so RLS still applies. The RPC buys atomicity, never authority.**
+
+This document previously planned `DEFINER` for the two reassignment RPCs, on the reading that the
+table policy "denies `owner_id` changes outright". It does not: `opportunities_update`'s
+`WITH CHECK` is `owner_id = current_user_id() or manages_outlet(outlet_id)`, which a manager for
+the record's outlet satisfies both before and after the change, and which a salesperson fails the
+moment `owner_id` names somebody else. The policy already expresses the rule precisely, so a
+`DEFINER` function would bypass it and then restate the same rule in PL/pgSQL — the one thing
+invariant 1 below exists to prevent — while exposing a callable function that moves ownership with
+its own privileges. Both roles are covered by integration tests. See `/docs/API.md` for the full
+deviation note.
+
+The reassignment RPCs exist at all only because ADR-001's reason GUC and the update must share one
+transaction, and PostgREST gives each statement its own.
 
 ### ADR-001 — the audit reason channel
 
@@ -300,17 +322,39 @@ RLS in V1**) · `order_reference` (accounting handoff — TODO-BD-09) · `is_imp
 CLAUDE_CODE_BUILD_SPEC.md · CLAUDE.md · README.md · .env.example
 /docs        PRODUCT_REQUIREMENTS · DATABASE · ARCHITECTURE · PERMISSIONS · API
              TESTING · DECISIONS · SETUP · DEPLOYMENT · IMPLEMENTATION_PLAN · SPEC_AUDIT
-/supabase    /migrations  /seed  config.toml
+/supabase    /migrations  /seed  /platform (local runtime only, ADR-018)  config.toml
+/scripts     db.sh · gen-types.mjs · check-no-service-key.sh
 /src/app     (auth)/login · (app)/{today,dashboard,accounts,contacts,projects,opportunities,
              team,reports,import,settings,archive,search} · api/cron/*
 /src/components   /ui (shadcn) · /shared · /layout
 /src/features     accounts · contacts · projects · opportunities · activities · dashboard · import
-/src/services     account · contact · project · opportunity · activity · dashboard · import
-                  settings · /integrations
-/src/lib          /supabase{client,server,admin} · money · phone · dates · errors · permissions
+/src/services     settings · auth · user · outlet · /integrations         [built]
+                  account · contact · project · opportunity · activity
+                  dashboard · import                                       [later phases]
+/src/lib          /supabase{client,server,admin,middleware,env} · money · phone · dates
+                  errors · permissions · validation · /opportunity/transitions
 /src/types        database.types.ts (generated) · domain.ts
 /tests            /unit /integration /e2e
 ```
+
+---
+
+## 12a. The local database runtime (ADR-018)
+
+Where the Supabase container images cannot be pulled, migrations, the integration and RLS suites,
+and type generation all run against a **real PostgreSQL 16 server**, with the platform objects the
+application depends on created by `supabase/platform/000_supabase_platform.sql` — **not a
+migration**, and never run against a Supabase project.
+
+- Migrations are applied by the **Supabase CLI** (`supabase migration up --db-url`), so ordering
+  and the `supabase_migrations` ledger are exercised for real.
+- Types come from **`@supabase/postgres-meta`** — the same generator the `supabase gen types`
+  container runs — invoked as a library.
+- Tests impersonate a user the way PostgREST does: `set role authenticated` plus
+  `set_config('request.jwt.claims', …)`.
+
+**What it cannot verify** — and what is therefore still open — is Supabase Auth itself, Storage
+policies, and PostgREST request handling. See `/docs/SETUP.md`.
 
 ---
 
@@ -328,7 +372,107 @@ These do not change without approval recorded in `/docs/DECISIONS.md` (§17.1, `
 5. **Business logic lives in services.** Actions authenticate, validate, delegate, map errors.
 6. **Money is bigint paise.**
 7. **Timestamps UTC, business day Asia/Kolkata** — explicitly converted, never session-default.
-8. **Eleven tables.** ADR-008 declined a twelfth for merge history.
+8. **Thirteen tables** — the spec's eleven plus `outlets` and `user_outlets` (ADR-016), which are
+   organizational structure rather than CRM records. ADR-008 declined a table for merge history and
+   §4.2's rejected tables stay rejected.
+11. **Outlet scope is enforced in the database** (ADR-016). A manager's reach is
+    `user_outlets`, never a role name and never a string comparison. `branch` is retired.
+12. **ADMIN has no automatic business-data visibility** (ADR-017).
 9. **No client-side Supabase writes** — with exactly one approved exception, the ADR-005 signed
    Storage upload.
 10. **No `TODO-BD` value hard-coded anywhere.** Resolution fixed the values, not the mechanism.
+13. **Every RPC is `SECURITY INVOKER`** (ADR / §16.3). An RPC exists for atomicity, never to gain
+    authority the caller does not have. The only service-role paths are the three of §15.7.
+14. **Three denormalised columns are maintained by triggers, not by services** (ADR-020):
+    `stage_changed_at`, both `last_activity_at` columns, and the `won → accounts.status` promotion.
+    Writing them from application code again is a defect.
+
+
+---
+
+## Master Phase 3 — the management layer
+
+**Fourteen tables.** The spec's eleven, plus `outlets` and `user_outlets` (ADR-016), plus
+`sales_targets` (ADR-021). Each addition beyond the eleven has an ADR recorded before its migration
+was written, and `tests/integration/service-contracts.test.ts` asserts the exact list.
+
+### Where a management number comes from
+
+```
+migration 022 RPC  ── aggregates in SQL, SECURITY INVOKER, RLS applies
+        │
+services/analytics.service.ts  ── one call per block, all issued together
+        │
+lib/metrics.ts  ── every ratio, share and classification, pure and unit-tested
+        │
+services/dashboard.service.ts  ── assembles; contains NO arithmetic
+        │
+app/(app)/dashboard | /team | /reports  ── renders; contains NO arithmetic
+```
+
+**A component that adds two numbers together has created a second definition of a metric**, and the
+two will disagree within a quarter. Win Rate, quote-to-order conversion, target achievement, share
+percentages and at-risk classification each exist exactly once, in `lib/metrics.ts`.
+
+### Three rules the layer holds to
+
+1. **Aggregate in SQL.** PostgREST cannot `GROUP BY`, and reducing rows in Node means an unbounded
+   transfer and — worse — silent truncation past the row cap. A dashboard that quietly
+   under-reports is worse than one that fails (ADR-022).
+2. **RLS is still the boundary.** The RPCs are SECURITY INVOKER. The `assertManagement()` checks in
+   the services are early, readable failures; `assert_management_access()` in the database is the
+   control, and it holds against a direct PostgREST call.
+3. **Filters narrow, never widen.** `?outlet=` and `?owner=` are passed straight to the RPCs. A
+   hand-typed id for another branch returns nothing, because RLS bounds what the query can see —
+   so the parameters need no validation of their own, and adding some would create a second gate
+   that could drift from the real one.
+
+### Charts
+
+Server-rendered inline SVG and CSS. No charting dependency and no client JavaScript for the trend
+line or the proportion bars (ADR-023). Recharts remains in the frozen stack and is the right answer
+for a genuinely interactive chart; these are not that.
+
+### CSV export
+
+One route handler, `/api/export/[dataset]`, which authenticates, validates, calls
+`export.service.ts` and maps errors. The service performs the `canExportCsv` check **before** any
+read, reads through the caller's own session so RLS applies, and refuses an export larger than
+`EXPORT_ROW_LIMIT` rather than truncating it. Money leaves as rupees and every cell is neutralised
+against spreadsheet formula injection, both in `lib/csv.ts`.
+
+---
+
+## Response security headers (§23, ADR-031)
+
+Split across two places, because one of them cannot be static.
+
+`next.config.ts` declares everything that never varies — `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff`, HSTS, `Referrer-Policy`, `Permissions-Policy`,
+`X-DNS-Prefetch-Control` — and switches `poweredByHeader` off. Declaring them there rather than in
+the middleware also covers the responses the middleware matcher skips: `_next/static`, images and
+`favicon.ico`.
+
+`middleware.ts` builds the **Content-Security-Policy** per request from `lib/security-headers.ts`,
+with a fresh 16-byte nonce, and sets it on the *request* as well as the response — Next.js reads
+the nonce off the request header to stamp it onto its own bootstrap scripts. `updateSession()`
+takes those extra request headers and rebuilds them on each `NextResponse.next()`, because
+`request.cookies.set()` writes back into the `cookie` header and a `Headers` copy taken earlier
+would carry the pre-refresh session.
+
+    default-src 'self'
+    script-src  'self' 'nonce-…' 'strict-dynamic'      ← no unsafe-inline, no unsafe-eval
+    style-src   'self' 'unsafe-inline'                  ← React writes style attributes
+    connect-src 'self' <supabase origin>                ← PostgREST, Auth, signed Storage uploads
+    frame-ancestors 'none' · object-src 'none' · base-uri 'self' · form-action 'self'
+
+`style-src` keeps `'unsafe-inline'` because nonces do not apply to style *attributes* at all; the
+alternative is not a stricter policy, it is a broken page. Scripts, where the risk actually is,
+take no such exemption.
+
+**The trap this walked into, recorded because it is easy to walk into again:** `/login` was
+statically prerendered, and a prerendered page has no nonce to stamp. It shipped twelve unnonced
+script tags under a policy where `'strict-dynamic'` makes `'self'` ignored — so every script would
+have been blocked while every header check passed. It is now `dynamic = 'force-dynamic'`.
+`scripts/smoke.sh` asserts the nonce is both fresh per request *and* present on the page's scripts,
+so the mismatch cannot return silently.

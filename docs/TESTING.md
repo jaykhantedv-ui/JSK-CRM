@@ -6,16 +6,86 @@ Derived from `CLAUDE_CODE_BUILD_SPEC.md` §19, §23. **No tests have been writte
 
 ## The gate
 
-> **Do not chase a coverage percentage — the fifteen E2E scenarios plus the RLS integration suite
-> are the real gate** (§19.5).
+```bash
+npm run verify     # typecheck -> lint -> unit -> integration -> build -> bundle check
+npm run test:e2e   # Playwright, separately (it starts a dev server)
+```
 
-> **Never verify a permission as OWNER — OWNER passes everything, which is exactly why it proves
-> nothing** (§23).
+**Run the full suite each phase. Fix every failure. Never skip, `.skip`, or delete a failing test
+to make a phase pass** (§22.1 step 8).
 
-> **A hidden button is never a control. Every security test must attack the API, not the UI**
-> (§19.4).
+Do not chase a coverage percentage. The gate is **the fifteen E2E scenarios plus the RLS suite**.
 
-> **Run the full suite each phase. Fix every failure. Never skip a failing test** (§22.1 step 8).
+### Current state — Master Phase 2 (Core CRM)
+
+| Suite | Count | Status |
+|---|---|---|
+| Unit (Vitest) | 282 | passing |
+| Integration + RLS (Vitest + PostgreSQL) | 239 | passing |
+| E2E (Playwright) | 21 passing, 12 skipped — see below | passing |
+| `tsc --noEmit` | — | clean |
+| ESLint | — | clean |
+| `next build` | — | clean |
+| Service-role key absent from the bundle | — | verified |
+
+Master Phase 1 finished at 232 unit and 154 integration. Phase 2 adds 50 unit and 85
+integration tests, across four new files:
+
+| File | Covers |
+|---|---|
+| `tests/unit/duplicates.test.ts` | §8.9 confidence scoring; that no copy ever says "blocked" |
+| `tests/unit/next-action.test.ts` | §8.3/§10.3 follow-up state, including the evening and pre-dawn IST boundaries |
+| `tests/unit/opportunity-title.test.ts` | §8.4 title generation; §12.8 pagination against hostile URL params |
+| `tests/integration/crm-workflows.test.ts` | §11.1 create flow, §9.3 stage side effects, next actions, ADR-020 triggers, many-opportunities-per-project |
+| `tests/integration/crm-permissions.test.ts` | outlet scope, assignment, search scoping, SQL-injection through search, stakeholders, the 24-hour activity window, the immutable audit trail |
+| `tests/integration/service-contracts.test.ts` | that every column and RPC the services name actually exists, with the right grants and `SECURITY INVOKER` |
+
+### Why `service-contracts.test.ts` exists
+
+Services reach the database through PostgREST, which cannot run here (ADR-018), so the query
+strings in `src/services/*` cannot be executed end to end. A typo inside one of those strings is
+invisible to the type checker. That file checks everything the queries depend on — column
+existence, RPC arity and security mode, single-FK embeds, execute grants, `security_invoker` on
+the view — so the remaining untested surface is PostgREST's own request handling rather than our
+use of it. It is not a substitute for a run against a real project, and is not described as one.
+
+### Where the tests run (ADR-018)
+
+§19.2 assumes `supabase start`. Where the Supabase container images are unreachable — as in the
+environment this was built in — the database suites run against a **real PostgreSQL 16 server**
+with the platform bootstrap in `supabase/platform/`.
+
+A test impersonates a user **exactly as PostgREST does**:
+
+```ts
+await db.query('select set_config($1, $2, true)', [
+  'request.jwt.claims',
+  JSON.stringify({ sub: userId, role: 'authenticated' }),
+])
+await db.query('set local role authenticated')
+```
+
+Nothing is mocked. `auth.uid()` resolves the way it does in production, and a policy that would
+refuse a real request refuses the test, with the same error code.
+
+**What cannot be tested here, and is not claimed to be:** Supabase Auth itself — password hashing,
+JWT issue, the built-in login rate limiting of C-5 — Storage buckets and their policies (§15.6),
+and PostgREST's own request handling. Those need a real Supabase project in `ap-south-1`.
+
+### The skipped E2E scenarios
+
+Twelve of the Phase 2 Playwright specs need a signed-in session, and signing in needs Supabase
+Auth (GoTrue), which this environment cannot reach. They are written against the real application
+and **skip with a stated reason** rather than being deleted or weakened; set
+`E2E_SUPABASE_READY=1` with real credentials and they run as written.
+
+They are not the only coverage of those workflows. Each is also proved at the database level in
+`crm-workflows.test.ts` and `crm-permissions.test.ts`, which run for real on every commit and are
+where the authorization rules are actually verified (§19.2). What E2E adds beyond them is
+browser-level: the sixty-second mobile flow at 375×812, and direct-URL access checks.
+
+The 21 specs that **do** run here need no session and cover §19.4's "unauthenticated access to
+every route" for all twelve Core CRM routes.
 
 ---
 
@@ -30,36 +100,68 @@ Derived from `CLAUDE_CODE_BUILD_SPEC.md` §19, §23. **No tests have been writte
 | Dashboard metrics | Every §13.1 definition against fixture arrays, including **Win Rate returning null (displayed `—`) when the denominator is 0** |
 | Dates | Overdue/due-today/days-in-stage **across timezone boundaries** — the IST↔UTC 00:00–05:30 window (`/docs/SPEC_AUDIT.md` B-10) |
 | Error mapping | Every constraint name → friendly message; unmapped errors become `INTERNAL` and never leak Postgres text |
+| Permissions | The §3.1 capability matrix cell by cell, outlet scope for zero/one/many outlets, and the ADR-017 ADMIN case — mirroring the RLS policies so the UI never offers an action the database refuses |
+
+**Built in Master Phase 1:** phone, money, dates, transitions, permissions, error mapping.
+**Arriving with their features:** duplicate confidence (§8.9) and the dashboard metrics (§13.1) —
+there is nothing to test until the code they describe exists, and a test written against an
+imagined implementation tests the imagination.
 
 ---
 
-## 2. Integration (Vitest + local Supabase) — database and RLS (§19.2)
+## 2. Integration (Vitest + a real database) — database and RLS (§19.2)
 
-Run against `supabase start` with seeded users of each role.
+Fixture users of every role, in `supabase/seed/dev-fixtures.sql`: an owner with no outlets, an
+admin, a manager on one outlet, a manager on two, a manager on none, three salespeople across two
+outlets, and a deactivated user. Three outlets, so *"assigned to A and C"* is distinguishable from
+*"sees everything"*.
 
 > **These are the most important tests in the project.**
+
+Files: `harness.ts` · `rls-outlet-scope.test.ts` · `schema-constraints.test.ts` ·
+`audit-trail.test.ts` · `no-hard-delete.test.ts` · `activities-window.test.ts` ·
+`timezone-and-flags.test.ts`.
 
 ### Constraints and triggers
 - Check constraints reject: won without value, won without `closed_at`, lost without reason, lost
   without `closed_at`, quoted without quotation ref, next-action half-set, nurture without date,
   contact with neither phone nor email, stakeholder with neither target.
-- The trigger writes an `opportunity_events` row on **every** stage and owner change — and both
-  rows when stage and owner change in one statement.
+- **`selection → negotiation` succeeds with no quotation information** — the ADR-006 regression
+  test, because the constraint binds on `quoted` alone.
+- An account with neither phone nor email is rejected (`account_reachable`, ADR-013).
+- The trigger writes an `opportunity_events` row on **every** stage and owner change, emits
+  `REOPENED` for `won → qualified` and `ARCHIVED`/`RESTORED` on archive, and reads the reason from
+  the `app.event_reason` GUC (ADR-001).
+- A service-role write with no `auth.uid()` is attributed to the system actor (ADR-003).
+- Reopening a won opportunity clears `final_order_value` and `closed_at`, **preserves the WON
+  event**, and leaves `accounts.status` alone (ADR-007).
 - The partial unique index rejects a second primary stakeholder.
-- `stage_changed_at` advances on stage change and only then (`/docs/SPEC_AUDIT.md` H-01).
-- `v_opportunity_flags` has `security_invoker = true` — asserted against `pg_class.reloptions`,
-  because a default view silently leaks every salesperson's pipeline (§25).
+- `phone_normalized` matches `lib/phone.ts` case for case, and is deliberately **not** unique.
+- **`v_opportunity_flags` has `security_invoker = true`** — asserted against `pg_class.reloptions`
+  *and* behaviourally, because a default view silently leaks every salesperson's pipeline (§25).
+- Every date expression in the view converts to Asia/Kolkata; the view definition is asserted to
+  contain **no bare `current_date`**, and `businessDate()` in TypeScript is checked against the SQL
+  expression at the 18:30 UTC boundary and across a year end.
 
 ### RLS — every assertion made as the restricted role
 - Salesperson A cannot SELECT, UPDATE or INSERT-on-behalf-of salesperson B's records.
 - Salesperson **can** read an account they do not own when they own an opportunity on it — and
   that account's contacts and projects by the same route.
-- Salesperson cannot change `owner_id` — by table UPDATE, by PostgREST, or through the RPC.
-- ADMIN cannot reassign; MANAGER and OWNER can (H-05, via `can_reassign()`).
+- Salesperson cannot change `owner_id`, cannot null it, cannot move a record to another outlet and
+  cannot archive one.
+- **Cross-outlet (ADR-016):** Manager A reaches outlet A and **not** B or C; a manager on A and C
+  reaches both and still not B; a manager with **no** outlets reaches nothing; revoking an
+  assignment removes the scope immediately. A record's outlet decides scope, **not its owner's
+  posting**.
+- **ADMIN reads no business data at all** (ADR-017) while still administering users, outlets and
+  settings; a manager cannot manage users or outlets.
+- A deactivated user holding a valid token reads nothing; an anonymous caller reaches nothing.
+- ADMIN cannot reassign; MANAGER and OWNER can (H-05, subsumed by ADR-017).
 - **ADMIN cannot export** through the Server Action, not merely through a hidden button (C-2).
 - **No role can DELETE from any business table**, including `users` (H-06) — asserted table by
-  table. **`project_stakeholders` is the single approved exception** (ADR-004) and must *succeed*;
-  all ten other tables must *fail*, for every role.
+  table and role by role, plus a check that `authenticated` holds the DELETE privilege on nothing
+  else. **`project_stakeholders` is the single approved exception** (ADR-004) and must *succeed*;
+  all twelve other tables must *fail*, for every role.
 - A salesperson cannot escalate their own role via a profile update.
 - Archived records are excluded from active queries and included in archive queries for
   authorised roles.
@@ -74,6 +176,22 @@ Run against `supabase start` with seeded users of each role.
 ---
 
 ## 3. End-to-end (Playwright) — the fifteen required scenarios (§19.3)
+
+**Master Phase 1 ships a smoke suite, not the fifteen scenarios.** Signing a user in needs Supabase
+Auth, which cannot run in this environment (ADR-018), and a test that faked a session would prove
+nothing about the thing it claims to test.
+
+What the smoke suite proves today:
+
+- the login screen renders, with an email field, a password field and a submit button;
+- **there is no sign-up link and no registration path** (§3.2);
+- an unauthenticated visitor to `/`, `/today`, `/dashboard`, `/settings` or `/accounts` lands on
+  the login screen;
+- no part of the authenticated shell renders for a signed-out visitor.
+
+The fifteen scenarios arrive with the features they cover, against a real Supabase project.
+
+### The fifteen required scenarios
 
 1. Salesperson creates a customer
 2. Salesperson creates a project
@@ -212,3 +330,185 @@ real Android device.
 
 Services and RLS: **high and meaningful**. UI components: **only where logic exists**.
 The gate is behavioural, not numeric.
+
+
+---
+
+## Master Phase 3 — what was added and what it proves
+
+| Suite | Files | Assertions |
+|---|---|---|
+| Unit | `metrics`, `period`, `csv` | 96 |
+| Integration / RLS | `management-scope` | 75 |
+| E2E | `management`, extended `smoke` | 12 scenarios (11 auth-gated, skipped here — ADR-018) |
+
+**Totals after the phase: 378 unit, 314 integration, 27 E2E passing with 24 auth-gated skips.**
+
+### Unit — every metric definition
+
+`tests/unit/metrics.test.ts` covers each metric in §13.1 and each one Master Phase 3 adds, and the
+zero-denominator cases are the point rather than an afterthought:
+
+- **Win Rate is null, never 0%**, when nothing closed. A branch that closed nothing has *no* win
+  rate; `0%` says it lost everything it touched, which is a different and defamatory claim about a
+  real person's month.
+- **Quote-to-order conversion** is null when nothing reached quotation, and 0 when quotations went
+  out and none converted — those are different facts.
+- **A target of zero is not an absent target.** Zero is how a target is withdrawn (ADR-021) and
+  reports as met; absent reports an em dash.
+- **Nurture is excluded** from Pipeline Value and Weighted Pipeline. This is the exclusion people
+  forget.
+- **`HIGH_VALUE_AT_RISK` never appears alone.** A large enquiry being worked properly is a good
+  thing, not a risk — and that subset relationship is what lets migration 022 filter on the union of
+  the other four reasons without restating the rule.
+- **Thresholds are arguments.** One test runs the same row against two threshold sets and gets
+  different answers, which is what "no `TODO-BD` value is hard-coded" means in practice.
+
+`tests/unit/period.test.ts` pins the Asia/Kolkata boundaries. Every assertion ending
+`T18:30:00.000Z` is checking the same thing: midnight in Erode is 18:30 the previous day in UTC. It
+includes the case that actually bites — 2026-09-01 00:15 IST is 2026-08-31 18:45 UTC, and a
+UTC-based reading would file it under August.
+
+`tests/unit/csv.test.ts` covers the export boundary, including **spreadsheet formula injection**: a
+customer legitimately named `=cmd|'/c calc'!A1` becomes executable the moment a manager opens the
+file, and each dangerous prefix has its own case.
+
+### Integration — the scope rules
+
+`tests/integration/management-scope.test.ts` is the important file. Every assertion is made **as the
+restricted role** (§23).
+
+Two things make it falsifiable rather than merely green:
+
+1. **Branch A and branch B carry different values.** A test that only counted rows could pass while
+   leaking; these compare totals, so a leak changes the answer. The strongest case asserts the
+   branch-A manager's Won Value, the owner's Won Value, and that the first is strictly less than the
+   second.
+2. **The fixtures contain the awkward rows on purpose** — a deal won without ever being quoted, so
+   the conversion denominator is provably not "everything won"; a quotation with no recorded
+   qualification, so turnaround's excluded count is provably not zero; a salesperson with nothing at
+   all, so the team list is provably not "people with opportunities".
+
+`tests/integration/management-fixtures.ts` arranges that set inside the test's own rolled-back
+transaction rather than in `dev-fixtures.sql`, because the Phase 2 suites assert against that file's
+row counts and changing it would break tests about something else.
+
+**The suite caught three real defects during the phase**, each recorded in the phase summary: a
+`void IS NULL` gate that silently disabled every query, a `percentile_cont` type mismatch, and a
+blanket function grant that re-exposed trigger functions migration 018 had revoked.
+
+### E2E
+
+`tests/e2e/management.spec.ts` holds the ten scenarios of §20 plus two direct attacks on the export
+route. **They require Supabase Auth and are skipped here with a stated reason** (ADR-018) — the
+container images are blocked by the egress policy, so there is no auth server to issue a session.
+They are written against the real application and run with `E2E_SUPABASE_READY=1`.
+
+**This is not treated as coverage.** Every scope rule in them is also proved at the database level in
+`management-scope.test.ts`, which runs for real on every commit.
+
+What does run without auth: the extended smoke suite, which now covers `/team` and every `/reports`
+route, and asserts that `/api/export/opportunities` answers a signed-out caller **401 rather than a
+302 to an HTML login page** — the assertion that found ADR-024.
+
+
+---
+
+## Master Phase 4 — operations, data and automation
+
+### Counts
+
+| Suite | Files | Tests |
+|---|---|---|
+| Unit (Vitest) | 19 | **482** |
+| Integration / RLS (Vitest + PostgreSQL) | 14 | **403** |
+| E2E (Playwright) | 4 | **59 passing, 32 skipped** |
+
+### New unit suites
+
+| File | Covers |
+|---|---|
+| `files.test.ts` | Magic-byte detection for the four allowed types; **a disguised executable is refused on its bytes** (§19.4); a RIFF container that is not a WebP; size limits; filename sanitisation against path traversal; the §15.6 path format |
+| `import-validation.test.ts` | Every §20.3 rule — required fields, phone, email, reachability, enum tolerance, unknown owner, unknown outlet, unknown city as a WARNING, in-file duplicates as ERRORs on **every** row sharing the value, duplicates against existing records |
+| `csv-parse.test.ts` | BOM, CRLF, quoted commas, doubled quotes, embedded newlines, short and long rows |
+| `cron-auth.test.ts` | Missing, wrong and correct secrets; **never a redirect**; an unset `CRON_SECRET` refuses everything; the §14.7 response shape on both the success and the failure path |
+| `automation.test.ts` | The ADR-011 hour gate across all 24 hours and in IST rather than UTC; weekly cadence; §20.6 rollback eligibility at both edges of the window |
+
+### New integration suites
+
+| File | Covers |
+|---|---|
+| `import-execution.test.ts` | Atomicity (one bad row → **nothing** created); undecided duplicates block the run; SKIP / IMPORT / **LINK_EXISTING never overwrites a field, including an existing `legacy_ref`**; provenance columns; rollback archives and never deletes; rollback refused after an edit and after seven days; permissions as salesperson, manager, admin |
+| `archive-and-merge.test.ts` | The cascade and its shared timestamp; activities and events **never** archived; restore does not resurrect a separately archived child; pipeline value drops; MERGED event metadata; authorship preserved; salesperson, ADMIN and out-of-scope manager all refused |
+| `storage-authorization.test.ts` | Per-role visibility by path prefix; malformed and unknown paths refused for everyone; ADMIN sees no business files; work context reaches attachments; **no delete policy**; writes into an invisible parent refused |
+| `automation-state.test.ts` | Dormancy, quotation expiry, `last_activity_at` corrections reported not suppressed; **H-09 — a maintenance run leaves rollback-window imports untouched and rollback still succeeds**; SLA deduplication; imported opportunities never SLA-eligible; settings permissions per role |
+
+### E2E — what runs and what does not
+
+**Two of the ten §19.3 operations scenarios run for real here.** The cron routes authenticate by
+**shared secret**, not by session, so `tests/e2e/operations.spec.ts` exercises the real routes, the
+real middleware exemption and the real §14.7 contract against a running server — 25 assertions
+across the five routes, on every commit.
+
+**Eight cannot, and are not pretended to.** Everything involving a signed-in user needs Supabase
+Auth; everything involving a file needs Supabase Storage. ADR-018 records why neither runs in this
+environment. Those specs are written against the real application and **skip with a stated
+reason**; they never report as passed.
+
+Run them against a real project with:
+
+```bash
+E2E_SUPABASE_READY=1 npm run test:e2e
+```
+
+**The skipped behaviour is not unverified.** Import execution, duplicate decisions,
+`LINK_EXISTING`, rollback, archive, restore, merge and every storage authorization rule are proved
+against a real PostgreSQL server in the four integration suites above — which is where §19.2 says
+the authorization model is actually verified. What E2E would add is the browser layer.
+
+---
+
+## Master Phase 5 — production readiness
+
+### Counts
+
+| Suite | Files | Tests | Change |
+|---|---|---|---|
+| Unit (Vitest) | 20 | **498** | +16 |
+| Integration / RLS (Vitest + PostgreSQL) | 15 | **425** | +22 |
+| E2E (Playwright) | 4 | 91 written, **auth-gated skips unchanged** | — |
+
+The E2E suites are unchanged and still skip themselves with a stated reason: hosted Supabase Auth
+is unreachable from this environment (`/docs/DEPLOYMENT.md` §0). They need no editing to run —
+set `E2E_SUPABASE_READY=1` with the credentials from `.env.example`.
+
+### New unit suite
+
+| File | Covers |
+|---|---|
+| `security-headers.test.ts` | Every §23 header and its value; that `script-src` carries the nonce and `'strict-dynamic'` and never `'unsafe-eval'` or `'unsafe-inline'`; that `frame-ancestors`, `object-src` and `frame-src` are `'none'`; that a missing or malformed Supabase URL narrows the policy rather than widening it to `*`; that `upgrade-insecure-requests` is production-only |
+
+### New integration suite
+
+| File | Covers |
+|---|---|
+| `rls-scope-equivalence.test.ts` | That migrations 028 and 029 changed *how often* the authorization rule is asked and not *what it decides* — the set form against the function it replaced, for OWNER, both managers, a manager with no outlets, two salespeople, ADMIN and a deactivated user; that an OWNER keeps a **deactivated** outlet's history, the one case where the two forms could have diverged; that `readable_*` return exactly what the parent table's RLS lets through; that an anonymous caller is refused at the table grant, before RLS is consulted |
+
+### Verification performed outside the suites
+
+These needed a running application rather than a test runner, so they are recorded here with what
+they proved.
+
+| Check | Method | Result |
+|---|---|---|
+| Migrations are deterministic | Two clean resets from empty, `pg_dump --schema-only`, byte comparison | **Byte-identical**, 29 migrations |
+| Generated types are current | `scripts/gen-types.mjs` against the live database, compared to the committed file | **Byte-identical** |
+| Security headers | `scripts/smoke.sh` against a real production build | **27/27 pass** |
+| CSP does not break the app | Real Chromium via Playwright, watching for violations and testing hydration | **0 violations**, form hydrates and accepts input |
+| API answers a status, not a page | `curl` against the running build | `401` JSON on every `/api/*`; `307` to `/login` on app routes |
+| Cron authentication | `curl`, all five routes, three secret states | `401` JSON missing and wrong; documented shape when correct |
+| Backup and restore | Real `pg_dump` → encrypt → restore into a separate database → verify | **PASS** — see `/docs/DEPLOYMENT.md` §7.4 |
+| Mobile | Chromium at 412×839, 320×658, 320×568 | No overflow, no touch target under 44 px, no data lost on blur |
+| Performance | 20,005 opportunities / 8,004 accounts, timed as each role | See ADR-032 |
+| Data quality | `scripts/data-quality.sql` | All structural checks zero; two configuration findings reported, not mutated |
+| Secrets | Full history scan, tracked files, built bundle | 0 matches across 9 commits; `check:bundle` clean |

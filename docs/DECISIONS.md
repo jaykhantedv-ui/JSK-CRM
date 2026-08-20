@@ -7,7 +7,7 @@ Two registers:
   `system_settings`, never in code: a resolved decision fixes the *value*, it does not licence a
   constant. Changing a value must still never require a deploy.
 - **B. Architecture decision record** — stack or architecture changes. §17.1 requires the reason
-  to be recorded **before** implementing the change. **Fifteen ADRs** are accepted below.
+  to be recorded **before** implementing the change. **Nineteen ADRs** are accepted below.
 - **C. Product decisions closing the remaining audit findings** — the five product/permission
   questions the audit raised that are neither `TODO-BD` items nor architecture changes.
 
@@ -223,6 +223,12 @@ now approved.
   filtering, and no branch behaviour in RLS in V1** (§17.6).
 - **How to change later.** Add filtering and a branch picker. **No migration needed.**
 - **Decided by:** Project Owner · **Date:** 2026-08-19
+- **SUPERSEDED 2026-08-19 by ADR-016.** The business restated the operating reality — two outlets
+  now, five to ten expected across Tamil Nadu, with managers holding zero, one or several of them.
+  `branch text` cannot carry an identity, an assignment or a deactivation, so **the columns are
+  retired and replaced** by the `outlets` table, the `user_outlets` link table and
+  `outlet_id` foreign keys. Outlet scope **is** enforced in RLS. A migration **is** needed. The
+  original decision is preserved above as the record of what the system held before.
 
 ---
 
@@ -741,6 +747,238 @@ a specification clause; §17.1 names Tailwind, not a Tailwind major.
 
 ---
 
+### ADR-016 — Outlets are a table and outlet scope is a link table; `branch` is retired
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Supersedes:** TODO-BD-12's "columns retained; no UI, filtering or RLS in V1"
+**Affects:** Phases 3, 4, and every later phase that reads a business table
+
+**Context.** TODO-BD-12 answered "is a second branch in the planning horizon?" with *keep the
+`branch text` columns, build nothing*. The business has since stated the operating reality:
+**two outlets today, five to ten across Tamil Nadu expected**, with 16 salespeople and 2 sales
+managers. It also stated the permission rule those outlets exist to serve — *a manager sees the
+records of the outlet(s) they are assigned to* — and the shapes it must survive: a manager with
+zero, one or several outlets; several managers on one outlet; a user moving between outlets
+without a role change; an outlet closing without its history disappearing.
+
+`branch text not null default 'MAIN'` cannot express any of that. It is free text, so an outlet
+has no identity, cannot be renamed, cannot be deactivated, and cannot be assigned to a person. A
+manager's scope would have to be a string comparison against a value nobody controls. Keeping
+`branch` *and* adding real outlets would leave two competing concepts in the schema, which the
+business explicitly ruled out.
+
+**Decision.**
+
+1. **`outlets` becomes a table.** `code`, `name`, `city`, `is_active`. Outlet names are data, never
+   constants, never enum values, and never part of a role name.
+2. **`user_outlets` is a link table** — `(user_id, outlet_id)` composite primary key. A user has
+   **zero or more** outlets. This is the only expression of outlet scope for a person.
+3. **`branch` is deleted, not kept.** Every column that carried it —
+   `users.branch`, `accounts.branch`, `projects.branch`, `opportunities.branch` — is replaced.
+   On `users` the replacement is the `user_outlets` link; on the three business tables it is
+   `outlet_id uuid not null references public.outlets(id)`.
+4. **Outlet scope is enforced in RLS**, not in application filtering, through
+   `public.manages_outlet(outlet_id)`.
+5. **Roles never encode an outlet.** `user_role` keeps its four values. There is no
+   `OUTLET_MANAGER_A`, and adding one would be a defect.
+
+**Consequences.**
+- **The model grows from eleven tables to thirteen.** This is the deviation being approved here,
+  and `CLAUDE.md` §4 requires it to be recorded before the migration is written — which is what
+  this entry does. Both new tables are organizational structure, not CRM business records: they
+  carry no money, no pipeline stage and no ownership. §4.2's rejected tables stay rejected.
+- A manager with **zero** outlets sees only their own records. That is the correct reading of
+  "records belonging to their assigned outlet scope(s)" when the scope is empty, and it means a
+  newly created manager is safe by default rather than accidentally company-wide.
+- **OWNER stays company-wide** and is deliberately *not* modelled as membership of every outlet —
+  company-wide authority is a property of the role, and enumerating outlets for the owner would
+  silently narrow their access the day an outlet is added.
+- Deactivating an outlet is `is_active = false`. Historical records keep pointing at it, so
+  reporting over a closed outlet still works. **`outlets` has no DELETE policy**, like every other
+  table except `project_stakeholders` (ADR-004).
+- Moving a user between outlets is an edit to `user_outlets` and touches neither their role nor
+  their records.
+- `outlet_id` is `not null` on the three business tables. A record that belongs to no outlet would
+  be invisible to every manager, which is precisely the accountability gap the CRM exists to close.
+- `handle_new_auth_user()` no longer defaults `branch` to `'MAIN'` (ADR-009); a provisioned user
+  starts with **no** outlet, and OWNER/ADMIN assigns one.
+- §5.10's settings keys are unaffected. **Outlets are rows, not settings** — they are referenced by
+  foreign key from business records, which a `system_settings` JSON array cannot do.
+
+**Alternatives considered.**
+- *Keep `branch` and add a `manager_branches text[]` column on `users`.* Rejected: outlets still
+  have no identity, renaming an outlet silently orphans a manager's scope, and an array column
+  cannot be foreign-keyed or deactivated.
+- *A single `outlet_id` on `users`.* Rejected outright by the stated requirement — a manager may
+  hold several outlets, and one manager per outlet was explicitly named as an assumption not to
+  make.
+- *Outlets in `system_settings.outlets` as JSON.* Rejected: business records must reference an
+  outlet by foreign key, and referential integrity is not available against a JSON array.
+- *Derive a record's outlet from its owner's membership.* Rejected: reassigning an opportunity to a
+  salesperson at another outlet would silently move historical records between outlets, and a
+  record owned by an unassigned (`owner_id is null`) opportunity would belong nowhere.
+
+---
+
+### ADR-017 — ADMIN does not receive automatic business-data visibility
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Supersedes:** the "See all records" ✔ for ADMIN in §3.1, and ADMIN's membership of
+`is_manager_or_above()` in §15.1
+**Affects:** Phases 3, 4, and every RLS policy on a business table
+
+**Context.** §3.1 grants ADMIN "See all records", and §15.1 defines
+`is_manager_or_above()` as `role in ('MANAGER','OWNER','ADMIN')`, so ADMIN passed the read policy
+on every business table. §3.2 simultaneously describes ADMIN as "a system/data role, not a sales
+role: no dashboards, no reassignment, no export". The business has now stated the position
+plainly: **ADMIN administers users, configuration, imports and the system; it does not carry an
+automatic right to read the pipeline.**
+
+Those two readings cannot both hold in a policy. Between them, the narrower one is the one that
+matches how the role is actually used and the one whose failure mode is a support request rather
+than a customer-data leak.
+
+**Decision.** `is_manager_or_above()` resolves to **MANAGER or OWNER**. ADMIN is removed from it.
+ADMIN keeps everything its administrative function requires, through `is_owner_or_admin()`:
+`users`, `user_outlets`, `outlets`, `system_settings`, `import_batches` and `import_rows`.
+
+**Consequences.**
+- ADMIN reading `accounts`, `contacts`, `projects`, `opportunities`, `activities` or
+  `opportunity_events` gets **their own records only** — the same as any user with no elevated
+  business role. This carries a dedicated negative test.
+- The helper keeps its specified name so §15 and `CLAUDE.md` §6 still describe where role lookups
+  happen; only its membership changes. Reviewers reading "or above" should read it as *above
+  SALESPERSON in the sales hierarchy*, which ADMIN is not on.
+- An administrator who genuinely needs pipeline visibility is given the OWNER role or a MANAGER
+  role with outlet scope — an explicit, auditable grant rather than a side effect of holding the
+  keys to user provisioning.
+- Import remains ADMIN's (§3.1), and the import executor runs as service-role, so ADMIN's loss of
+  direct read access does not affect it.
+- §3.1's ADMIN row for "See all records" is contradicted. Recorded in `/docs/SPEC_AUDIT.md`.
+
+**Alternatives considered.** Leaving ADMIN inside `is_manager_or_above()` — rejected: it grants the
+role that provisions users a silent, untested read over every customer record in the business,
+which is the opposite of what §3.2 says the role is for.
+
+---
+
+### ADR-018 — The database runtime is plain PostgreSQL with a platform bootstrap when Docker is unreachable
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Affects:** Phases 3 onward, CI, `/docs/SETUP.md`, `/docs/TESTING.md`
+
+**Context.** §19.2 requires the integration and RLS suites to run against a real database, and §7
+of this build requires generated types to come from a verified database and never to be
+hand-written. `supabase start` pulls its images from `public.ecr.aws`, whose blob CDN
+(`d2glxqk2uabbnd.cloudfront.net`) is **denied by the environment's egress policy**. `supabase gen
+types --local` shells out to the `postgres-meta` container and fails the same way. Working around
+the egress policy is not an option, and neither is declaring the phase verified without ever
+executing the SQL.
+
+**Decision.** Migrations, tests and type generation run against a **real PostgreSQL 16 server**,
+with the Supabase platform objects the application depends on created by a bootstrap file that is
+**not a migration**:
+
+- `supabase/platform/000_supabase_platform.sql` creates the roles (`anon`, `authenticated`,
+  `service_role`, `authenticator`, `supabase_admin`), the `auth`, `extensions` and `graphql_public`
+  schemas, `auth.users`, and `auth.uid()` / `auth.jwt()` / `auth.role()` / `auth.email()` **with
+  the platform's own definitions**, which read `request.jwt.claims`.
+- Migrations are applied by the **Supabase CLI** (`supabase migration up --db-url`), which needs no
+  container, so migration ordering and the `supabase_migrations` ledger are exercised for real.
+- Types are generated by **`@supabase/postgres-meta`** — the same generator the
+  `supabase gen types` container runs — invoked as a library against the same database.
+
+**Consequences.**
+- Tests impersonate a user exactly as PostgREST does: `set role authenticated` plus
+  `set request.jwt.claims`. An RLS test is therefore a test of the policy, not of a mock, and it
+  fails for the same reasons a production request would.
+- **Two dev dependencies are added**, both `devDependencies` only, both shipping nothing to the
+  browser, and both consequences of the same decision. §17.1 requires the reason to be recorded
+  before installation — this entry is that record.
+  - **`@supabase/postgres-meta`**, pinned to the version the CLI's container image uses, for type
+    generation.
+  - **`pg`** (plus `@types/pg`), for the integration and RLS suites. §19.2 assumed the suite would
+    reach the database through PostgREST on the local Supabase stack; without that stack the tests
+    connect to PostgreSQL directly and impersonate a user the way PostgREST does — `set role
+    authenticated` plus `set_config('request.jwt.claims', …)`. `pg` is already present as a
+    transitive dependency of `@supabase/postgres-meta`; declaring it is honesty about what the
+    test harness imports, not an extra download.
+
+  No runtime dependency, no application code and no architecture changes.
+- `npm run db:types` keeps its Supabase-CLI definition for machines that can reach Docker;
+  `npm run db:types:nodocker` is the equivalent that does not need it. **Both write the same file
+  from the same generator.**
+- The bootstrap reproduces **only** what Supabase guarantees and the application actually uses. It
+  is not a Supabase reimplementation: there is no GoTrue, no PostgREST, no Storage, and nothing in
+  `supabase/migrations` may depend on anything it defines beyond those objects.
+- What this runtime **cannot** verify is recorded honestly rather than assumed: Supabase Auth's own
+  behaviour (password hashing, JWT issue, its built-in login rate limiting, C-5), Storage buckets
+  and their policies (§15.6), and PostgREST's request handling. Those need a real Supabase project
+  and stay open until one is provisioned in `ap-south-1` (TODO-BD-08).
+- `supabase/config.toml` still declares `major_version = 17`; the local runtime is PostgreSQL 16.
+  Nothing in the schema uses a 17-only feature, and the remote project remains the authority.
+
+**Alternatives considered.** Waiting for a remote Supabase project (blocks every downstream phase
+on infrastructure provisioning that is not this phase's work, and would put an unverified schema
+into a shared environment); hand-writing `database.types.ts` (forbidden, and it would stop
+reflecting the database the moment either drifted); declaring Phase 3 verified without executing
+the SQL (a fabricated result — `CLAUDE.md` §15).
+
+---
+
+### ADR-019 — `opportunity_events.created_at` defaults to `clock_timestamp()`
+
+**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Resolves:** audit **P1-05** · **Affects:** Phase 3, and every reader of the audit trail
+
+**Context.** §5.9 declares `created_at timestamptz not null default now()`. In PostgreSQL `now()`
+is **transaction start time**, identical for every statement in a transaction — it is
+`transaction_timestamp()` under another name.
+
+§16.3 requires `changeOpportunityStage`, `logActivity` and `bulkReassign` to run as **single
+transactions**, and `log_opportunity_event()` writes one row per change it observes. A stage change
+and a reassignment applied in one RPC therefore produce two events carrying an **identical**
+timestamp, and §5.9's own index — `(opportunity_id, created_at desc)`, the index that exists
+specifically so the trail can be read in order — cannot separate them. The order the timeline shows
+is whatever the planner returns, and it may differ between two reads of the same data.
+
+Multi-event transactions are the normal case here, not an edge case, so this is a defect in the
+audit trail's central promise: that it is a faithful, readable record of what happened and when.
+
+**Decision.** The column defaults to **`clock_timestamp()`**, which returns the actual wall-clock
+instant at the moment the row is written. Events written in one transaction receive distinct,
+correctly ordered timestamps.
+
+**Nothing else about the audit model changes.** The trigger remains the single writer; there is
+still no INSERT, UPDATE or DELETE policy; the reason still arrives through the `app.event_reason`
+GUC (ADR-001); the actor still falls back to the system user (ADR-003).
+
+**Consequences.**
+- A deviation from §5.9's DDL — the deviation being approved here. It is a **correction toward the
+  spec's stated intent** rather than away from it: §5.9 exists so that "no path can bypass the
+  audit", and an audit nobody can order is not one that can be relied on.
+- `created_at` on this table now means *when the event happened*, while `created_at` elsewhere in
+  the schema means *when the row's transaction began*. That difference is deliberate and is exactly
+  the distinction between an audit log and an ordinary record.
+- The change is confined to `013_opportunity_events.sql`, which **has never been applied to any
+  shared environment** — no hosted project exists — so §21.2's append-only rule is not engaged.
+  Once a shared environment exists, a change like this becomes a new migration.
+- `clock_timestamp()` is `VOLATILE`. That is fine in a column default, and the column is not used
+  in an index expression or a generated column, so nothing else is affected.
+- An event timestamp may now be **later** than the `updated_at` of the opportunity that caused it,
+  by microseconds. Readers must not assume the two are equal; they never meaningfully were.
+
+**Alternatives considered.**
+- *Leave `now()` and order by a tiebreaker.* There is none: the primary key is a random uuid, and
+  adding a sequence column to an append-only table to work around a wrong default is more schema
+  for a worse result.
+- *Order by `id`.* `gen_random_uuid()` is not monotonic; this would produce a stable but
+  **arbitrary** order, which is worse than an obviously unstable one because it looks correct.
+- *`statement_timestamp()`.* Distinguishes statements but not two rows written by one trigger
+  invocation, which is precisely the case §16.3 creates.
+
+---
+
 # C. Product decisions closing the remaining audit findings
 
 Five questions the audit raised that are neither `TODO-BD` items nor architecture changes.
@@ -840,6 +1078,399 @@ permission positions, not defects.
   the platform's configured limits, so those limits are recorded in `/docs/DEPLOYMENT.md` once the
   projects are provisioned.
 
+### ADR-020 — Three denormalised columns are maintained by database triggers, not by services
+
+**Status:** Accepted
+**Date:** 2026-08-19   **Decided by:** Engineering, during Master Phase 2
+
+**Context.** Three values the specification stores rather than derives —
+`opportunities.stage_changed_at` (§5.7), `accounts.last_activity_at` /
+`opportunities.last_activity_at` (§5.3, §5.7), and `accounts.status = 'ACTIVE'` on a win (§8.7) —
+were left to "the service writes it". Building the activity flow exposed that this cannot work.
+
+A salesperson may log an activity against an account they do **not** own, on the strength of
+owning an opportunity attached to it — the work-context rule of §3.2, expressed in the
+`activities_insert` policy as `can_read_account(account_id)`. But `accounts_update` requires
+ownership or outlet management. So a service-layer `update accounts set last_activity_at = …`
+issued by that same salesperson matches **zero rows** and silently succeeds. Recency on the
+Customer 360 header, and every dormancy query built on it, would quietly stop moving for exactly
+the collaborative accounts where activity matters most. The same reasoning applies to promoting
+an account to `ACTIVE` when a work-context opportunity is won.
+
+`stage_changed_at` fails differently: `opportunities_update` permits a manager to change `stage`
+through a direct PostgREST call, which leaves the clock reading the old value, so `days_in_stage`
+under-reports and a stalled opportunity looks fresh.
+
+**Decision.** Migration 018 moves all three into triggers:
+
+- `touch_stage_changed_at()` — BEFORE UPDATE, plain SECURITY INVOKER; it only writes to the row
+  already being updated.
+- `touch_last_activity_at()` — AFTER INSERT on `activities`, SECURITY DEFINER, using
+  `greatest(...)` so a back-dated activity never makes an account look staler than it is.
+- `apply_won_account_status()` — AFTER UPDATE on `opportunities`, SECURITY DEFINER, promoting
+  `PROSPECT → ACTIVE` only. Deliberately one-directional: reopening a won opportunity (ADR-007)
+  does not demote the account, because it may hold other won opportunities and a customer who has
+  bought once has bought. `DORMANT` and `DO_NOT_CONTACT` are left alone — a sale does not overrule
+  an instruction not to contact somebody.
+
+**Consequences.** The two SECURITY DEFINER triggers run with the table owner's rights, which is
+the same mechanism `log_opportunity_event()` (§5.9) and `handle_new_auth_user()` (ADR-009) already
+rely on. They are a *system consequence of a write the caller was already authorized to make*, not
+a new privilege: each fires only from an insert or update that RLS had to permit first. They add
+no callable surface — `EXECUTE` is revoked from `public` and `anon`, and an integration test
+asserts that neither `authenticated` nor `anon` can invoke any of them directly.
+
+The services become simpler and, more importantly, cannot forget. Reviewers must know that these
+three columns are not written by application code; writing them there again would be a defect.
+
+**Alternatives considered.**
+- *Leave it in the services and widen `accounts_update`.* Rejected: work context grants read, not
+  write (§15.4), and widening it to make a denormalised column writable would hand a salesperson
+  edit rights over another person's customer record.
+- *A SECURITY DEFINER helper function the service calls.* Rejected: any authenticated user could
+  then call it through PostgREST and flip an arbitrary account to `ACTIVE`, or backdate somebody
+  else's recency. A trigger has no such surface.
+- *Compute all three in queries instead.* Rejected for `last_activity_at` and `stage_changed_at`:
+  §5.7 stores them, they are indexed, and the dormancy and stall queries scan them. `status` is a
+  business state a user can also set by hand, so it cannot be derived at all.
+
+---
+
+---
+
+### ADR-021 — Sales targets are a table, not a `system_settings` key
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** Master Phase 3, `/reports/targets`, `services/target.service.ts`, migration 021
+
+**Context.** Master Phase 3 §10 requires a monthly sales-target mechanism at company, outlet and
+salesperson level, and instructs that an existing settings structure be preferred over a new table.
+The specification has no target concept at all, so this is an addition to it recorded here rather
+than a reading of it (CLAUDE.md §2).
+
+`system_settings` was the obvious candidate: it is a key→jsonb store, OWNER/ADMIN already write it,
+and a nested `{ "2026-08": { company, outlets, users } }` document would have carried every scope
+with no schema change.
+
+**It cannot carry this, for one reason that is not fixable by nesting the data differently.**
+`system_settings_select` grants **every authenticated user read on every settings row**, on purpose:
+stage probabilities and the city list are needed to render almost any screen, and a per-key policy
+would mean a policy per key. A monthly sales target is management data. Storing it in
+`system_settings` would publish the company's target — and every salesperson's individual target —
+to every salesperson through a single PostgREST call. No UI gating changes that (CLAUDE.md §6), and
+Master Phase 3 §20 requires an integration test proving a salesperson cannot reach management data.
+That test would have failed, correctly.
+
+**Decision.** A fourteenth table, `public.sales_targets`, with its own RLS.
+
+- Columns: `period_month` (always a month start), `outlet_id` (null = company-wide),
+  `user_id` (null = the whole outlet), `target_paise`, `note`, audit columns.
+- `target_user_requires_outlet` — a person's target is always a target **at** an outlet, so the RLS
+  policy can read scope from `outlet_id` alone.
+- Three **partial** unique indexes, one per scope. A plain three-column unique constraint would not
+  work: `null` is distinct from `null` in a unique index, so unlimited duplicate company rows would
+  be legal.
+- RLS: `outlet_id is null` → OWNER only; otherwise `manages_outlet(outlet_id)`. SALESPERSON and
+  ADMIN match neither branch and see nothing.
+- **No DELETE policy.** The schema still holds exactly one, on `project_stakeholders` (ADR-004). A
+  target is withdrawn by setting it to **zero**, and `targetProgress()` reports a zero target as met
+  rather than as a 0% failure — "no target" and "a target of zero" are different facts and render
+  differently.
+- `guard_target_scope()`, a trigger mirroring `guard_record_scope()`: the UPDATE policy's WITH CHECK
+  only proves the caller manages the **destination** outlet, so without the trigger a manager of two
+  branches could re-point one branch's target at the other and quietly erase it from the first
+  branch's reporting.
+
+**Consequences.**
+- §4.1's "eleven tables, no more" now reads eleven + `outlets` + `user_outlets` (ADR-016) +
+  `sales_targets`. `tests/integration/service-contracts.test.ts` asserts the exact list, so a
+  fifteenth table fails the suite until an ADR justifies it. That test caught this addition, which
+  is the mechanism working.
+- Targets are **planning figures, not accounting records** (§2.2). No metric depends on one
+  existing; every screen renders an em dash without one.
+- Scales to five or ten outlets with no shape change: one row per scope per month.
+
+**Alternatives considered.** A `system_settings` key (rejected above — it leaks). A per-key policy on
+`system_settings` (turns a two-policy table into a policy-per-key table, and every future key becomes
+a security decision). Deriving targets from last year's actuals (invents a number the business did
+not set — CLAUDE.md §15).
+
+---
+
+### ADR-022 — Management metrics are aggregated in SQL by SECURITY INVOKER RPCs
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** Master Phase 3, migration 022, `services/analytics.service.ts`
+
+**Context.** PostgREST cannot `GROUP BY`. The Phase 2 pipeline tile therefore selected up to 5,000
+rows with `.limit(5000)` and reduced them in Node. That is acceptable for one tile on one screen and
+unacceptable for a management layer, for two reasons: the transfer grows with the pipeline, and a set
+larger than the limit is **silently truncated** — a dashboard that quietly under-reports is worse
+than one that fails.
+
+**Decision.** Thirteen aggregate functions in migration 022, every one **SECURITY INVOKER**, so RLS is
+evaluated exactly as it is for a table read. An RPC buys atomicity and aggregation, never authority
+(§16.3).
+
+Four rules the file holds to:
+
+1. **`plpgsql`, not `sql`.** The management gate must run whether or not the query matches a row.
+   Written as a WHERE predicate inside a `language sql` body it is subject to the planner: against a
+   caller who can see nothing, the scan yields nothing and the gate may never be evaluated — the
+   caller gets a polite empty report instead of a refusal. `perform` on the first line of a plpgsql
+   body is unconditional. **A security control must not depend on a planner decision.**
+2. **No threshold is written in the file.** Stall days, dormancy days, the high-value threshold and
+   the stage probabilities all arrive as parameters from the settings service (CLAUDE.md §3).
+3. **Period boundaries arrive as instants** computed by `lib/dates.ts` from Asia/Kolkata day
+   boundaries. Where SQL must bucket by month it does so explicitly at `Asia/Kolkata`; a bare
+   `date_trunc` would bucket in the session timezone — UTC on Supabase — and put the first five and a
+   half hours of every Indian month in the previous one (CLAUDE.md §10).
+4. **`p_limit` is capped at 1000**, which is `max_rows` in `supabase/config.toml`. PostgREST
+   truncates beyond that number without saying so, so a higher ceiling would be a promise the
+   transport cannot keep.
+
+**`assert_management_access()`** refuses SALESPERSON and ADMIN at the database boundary. Without it a
+salesperson calling `management_team_workload` through PostgREST would receive a one-row report of
+their own numbers — no other person's data, because RLS holds, but a team surface all the same, and
+Master Phase 3 §4 is explicit that team dashboards are not a salesperson surface.
+
+**`scoped_outlet_ids()`** answers "which branches may this caller compare". OWNER resolves to every
+**active** outlet at read time rather than to membership rows, so a branch opened tomorrow is in
+scope tomorrow (ADR-016).
+
+**Consequences.**
+- One round trip per dashboard block, issued concurrently. No N+1, no unbounded query, no silent
+  truncation.
+- Grants are made **function by function**. A blanket `grant execute on all functions in schema
+  public` re-exposed the SECURITY DEFINER trigger functions that migration 018 had deliberately
+  revoked; `tests/integration/service-contracts.test.ts` caught it, and the per-function grant is the
+  fix.
+- The at-risk predicate in SQL is the **union of the risk reasons**, not a second copy of them.
+  Naming which reasons apply is `classifyRisk()` in `lib/metrics.ts`, which is pure and unit-tested.
+  High-value-at-risk is a strict subset of overdue-or-stalled, so the SQL does not restate it —
+  a unit test asserts that reason never appears alone, which is what makes the two agree.
+
+**Alternatives considered.** Reducing rows in Node (silent truncation, unbounded transfer). Views
+(cannot take a period parameter). Materialised views (an extra thing to refresh, invisible staleness,
+and no measured performance problem to justify it). A separate analytics warehouse (§16 forbids it).
+
+---
+
+### ADR-023 — The management trend and proportion visuals are inline SVG, not Recharts
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** `features/management/charts.tsx`
+
+**Context.** §13.4 specifies "Won Value by month, last 12 months — one line chart", and §13.3 Panel B
+shows workload as bars. Recharts is in the frozen stack (§17.1), so using it would need no approval —
+this entry records the decision **not** to, which is the one that deserves an explanation.
+
+**Decision.** Both visuals are server-rendered inline SVG and CSS, with no charting dependency and no
+client JavaScript.
+
+**Reasoning.** These are a bar whose width is a percentage and a twelve-point polyline. Recharts would
+make both Client Components, ship a charting runtime to a phone in a showroom, and replace nine lines
+of SVG with a dependency. §17.1's own instruction is to prefer the platform. The management screens
+come in at 118 kB first-load as a result, against a 103 kB shared baseline.
+
+**Consequences.**
+- Every visual is also stated in text beside itself, so the figures survive greyscale, sunlight and a
+  screen reader (§12.1) — and the screens degrade to something perfectly readable if the SVG does not
+  render.
+- The trend line's y-axis starts at zero, deliberately: a line scaled to its own minimum turns a 3%
+  variation into a cliff.
+- **This is not a rejection of Recharts.** A genuinely interactive chart — tooltips, zoom, a brush —
+  would be a different decision and Recharts would be the right answer to it. Adding it later needs no
+  new approval; it is already in the frozen stack.
+
+---
+
+### ADR-024 — An unauthenticated API request is answered with 401, not a redirect
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** `src/middleware.ts`
+
+**Context.** The middleware redirected every unauthenticated request to `/login`. For a page that is
+right. For `/api/export/opportunities` it is not: the caller follows the redirect, receives the login
+page as **HTML with status 200**, and a script downloading a CSV writes that HTML into a `.csv` file
+believing it has data. The Phase 3 smoke test asserted "a signed-out visitor gets no data" and failed
+on the 200, which is how this was found.
+
+**Decision.** A request to `/api/*` without a session is answered `401` with a JSON body. Page routes
+keep the redirect, including the `?next=` destination that resumes an interrupted task.
+
+**Consequences.** A refusal is legible from the status line. The rule is in the middleware, so every
+route handler added later inherits it.
+
+**Open for Master Phase 4.** `/api/cron/*` is authenticated by a shared secret rather than a session
+(§14.7), so those routes will need an exemption when they are built. They do not exist yet — Phase 3
+does not build cron (§22) — and the behaviour is unchanged from Phase 2, which redirected them.
+Recorded here so it is not discovered as a mystery.
+
+
+## Master Phase 4 — operations, data and automation
+
+### ADR-025 — Import notification suppression is a durable column, not a transaction-local flag
+
+**Status:** accepted, 2026-08-20 · **Supersedes the mechanism in §20.5, not its intent**
+
+§20.5 says a **transaction-local flag** suppresses SLA notification eligibility during an import.
+A transaction-local flag cannot do that job. The SLA reminder is a cron route that runs hourly,
+long after the import transaction has committed and its GUC has gone; Phase 15's own risk note
+says the suppression "must survive the cron path, not just the request path", which is precisely
+what a GUC cannot do.
+
+**Decision.** The mechanism is the **`is_imported` column that §20.5 already requires on every
+created row**, and the cron queries exclude it. `026_contacts_import_columns.sql` adds the column
+to `contacts`, which was missing all three provenance columns (see below).
+
+This is also the truthful rule rather than a workaround. A customer copied out of a 2019 paper
+register is **not** a new enquiry that somebody failed to answer within forty-eight hours, and it
+never becomes one — not an hour after the import, and not a year after it. The intent of §20.5 is
+fully served; only the mechanism differs, and the durable one is strictly stronger.
+
+**Defect fixed alongside.** `contacts` carried none of `is_imported`, `legacy_ref` or
+`import_batch_id`, although §20.2 lists `legacy_ref` in the contacts template and §20.5 requires
+all three on every imported row. Without them an imported contact was indistinguishable from a
+typed one, so §20.6's rollback could not find it and the seven-day undo silently covered only
+half of what was imported. Added in a **new numbered migration**, per H-03 and §21.2.
+
+**Tested.** `tests/integration/automation-state.test.ts` — an imported opportunity is never
+SLA-eligible; `import-execution.test.ts` — every created row carries all three columns, and
+rollback finds contacts as well as accounts.
+
+---
+
+### ADR-026 — `merge_accounts` is `SECURITY DEFINER`, with its authorization written into the function
+
+**Status:** accepted, 2026-08-20 · **Narrow exception to CLAUDE.md §8's SECURITY INVOKER rule**
+
+CLAUDE.md §8 requires multi-table write RPCs to be `SECURITY INVOKER` so RLS still applies.
+`merge_accounts` cannot be, and the reason is specific rather than convenient.
+
+`activities` is append-only with a **24-hour, author-only** edit window (§5.8). A manager has no
+UPDATE path to it at all, by design. But an activity is keyed to `account_id`, and a merge that
+left the activities behind would strand the customer's entire history on a record that is about
+to be archived — the Customer 360 timeline the whole system exists to produce (§1.2) would come
+up empty for the surviving customer.
+
+**Decision.** `merge_accounts` is `SECURITY DEFINER`, in the same sense as `log_opportunity_event()`
+and the ADR-020 triggers: it performs a system consequence of an action the caller was already
+authorized to take. The authorization the DEFINER context skips is written into the function and
+runs first:
+
+- `is_manager_or_above()` — a salesperson and an ADMIN are both refused;
+- `can_read_account()` on **both** records — otherwise a manager could merge a record from an
+  outlet they do not manage into one they do, which is a way to read another outlet's data;
+- neither record may be archived.
+
+It is not a way to edit an activity. `performed_by`, `summary`, `occurred_at` and every other
+column are untouched — history is not rewritten (§8.1). Only the customer the activity hangs off
+moves.
+
+**Tested.** `tests/integration/archive-and-merge.test.ts`, as the restricted role in every case:
+salesperson refused, ADMIN refused, manager refused for an out-of-scope record, authorship
+preserved, nothing deleted.
+
+---
+
+### ADR-027 — A `MERGED` opportunity event type
+
+**Status:** accepted, 2026-08-20 · **Extends `opportunity_event_type`; no new table**
+
+ADR-008 makes account merge irreversible in V1, which raises the bar on its audit rather than
+lowering it: what the merge moved must be recoverable by reading. §9.2 requires every
+system-recorded change to an opportunity to appear in `opportunity_events`, and CLAUDE.md §13
+requires the trigger on `opportunities` to remain that table's **single writer** — so the merge
+cannot insert its own audit row, and none of the eight existing event types means "this
+opportunity was moved to another customer record".
+
+**Decision.** Add `MERGED` to `opportunity_event_type` and extend the trigger to write it whenever
+`account_id` changes, carrying `from_account_id`, `to_account_id` and the ADR-001 reason. Nothing
+but `merge_accounts` moves an opportunity between accounts, so any such change **is** a merge.
+
+**No merge-history subsystem and no twelfth table** — the phase brief rejects both, and one event
+row per moved opportunity is the audit ADR-008 asks for.
+
+The enum value gets its own migration (`023`). PostgreSQL refuses to use a new enum value inside
+the transaction that added it, and the Supabase CLI applies each migration file in its own
+transaction; splitting them is what keeps the sequence applyable from empty in one pass.
+
+---
+
+### ADR-028 — Resend is called over HTTP; the SDK is not installed
+
+**Status:** accepted, 2026-08-20 · **No new dependency**
+
+§17.1 names Resend as the V1 email implementation and freezes the dependency list. Resend's send
+endpoint is a single authenticated POST, and the SDK would ship a wrapper around `fetch` to make
+it.
+
+**Decision.** `services/integrations/notification.ts` calls the HTTP API directly. Resend remains
+the implementation; only the client is ours. This is the same call the repository already made
+twice — `Intl` instead of `date-fns-tz` (M-13), a hand-rolled magic-byte check instead of
+`file-type` (M-14).
+
+**M-28 still binds.** `RESEND_API_KEY` and `RESEND_FROM_EMAIL` are both required. A deployment
+missing either does **not** silently pretend to send: the jobs count the attempts as failures and
+log the reason, which is what an operator needs to see.
+
+---
+
+### ADR-029 — `automation.service.ts` is a permitted service-role caller
+
+**Status:** accepted, 2026-08-20 · **Clarifies ADR-009's "cron routes"**
+
+ADR-009 permits three service-role callers, one of them "cron routes". CLAUDE.md §8 requires the
+business logic to live in `src/services/*` and route handlers to do four things only. Those two
+rules together mean the code that actually needs the service-role client is the service the cron
+routes call, not the route files.
+
+**Decision.** The ESLint boundary lists `src/services/automation.service.ts` alongside the cron
+routes, the import executor and user provisioning. The routes stay thin: authenticate, call, map.
+The permitted set is still exactly the cron execution path, the import executor and user
+provisioning — expressed where the code lives.
+
+`src/features/management` was also added to the §18 feature-boundary list, which it had been
+missing since Master Phase 3, so the no-cross-feature-import rule is now enforced on it.
+
+---
+
+### ADR-030 — Two optional import columns the schema requires and §20.2 predates
+
+**Status:** accepted, 2026-08-20
+
+§20.2's templates were written before ADR-016 replaced §5.3's free-text `branch` with a real
+outlet reference, and `accounts.outlet_id` is `not null`. `contacts.owner_id` is `not null` and
+§20.2's contact template has no owner column at all. Neither can be satisfied by the templates as
+written, and neither may be invented (CLAUDE.md §15).
+
+**Decision.** Two **optional** columns, both defaulting to something already true rather than to a
+guess:
+
+| Column | Entity | Default when blank |
+|---|---|---|
+| `outlet_code` | accounts | the owner's current outlet |
+| `owner_email` | contacts | the linked customer's owner, else the person running the import |
+
+A row that cannot resolve either way is an **ERROR** with a message naming the column — never a
+silently invented value. `source` defaults to `OTHER` rather than §5.3's `WALK_IN` for the same
+reason: a paper register says nothing about how the customer arrived, and recording every
+historical customer as a walk-in would put invented data into the source report.
+
+---
+
+## Master Phase 2 corrections
+
+Three defects were found and fixed while building the Core CRM. Recorded here because each
+changed behaviour that Master Phase 1 had signed off.
+
+| Defect | Where | Fix |
+|---|---|---|
+| `en-GB` abbreviates September as **"Sept"** — four letters — while every other month uses three, so §8.11's `dd MMM yyyy` was violated one month in twelve and date columns lost their alignment | `lib/dates.ts`, `lib/opportunity/title.ts` | Month taken from `en-US` (always three letters) and the `dd MMM yyyy` order imposed explicitly via `formatToParts`. Regression test covers all twelve months |
+| A `datetime-local` value carries no timezone; sending it to a `timestamptz` column made PostgreSQL read it in the session timezone (UTC), so a back-dated activity landed 5½ hours late | activity Server Action | `businessLocalToUtc()` anchors the wall-clock value to Asia/Kolkata before it is sent (CLAUDE.md §10) |
+| `expectRejected()` left the transaction aborted, so a second assertion in the same test failed with `25P02` rather than the rule under test — a test asserting only "it was rejected" could pass for the wrong reason | `tests/integration/harness.ts` | Each rejection now runs inside its own savepoint |
+
 ---
 
 ## Open items — none
@@ -862,6 +1493,115 @@ that were open after the first decision pass and how each closed:
 | **M-21 backup destination** | **Final** — AWS S3 Mumbai `ap-south-1`, business-controlled account, 90-day minimum retention. See `/docs/DEPLOYMENT.md` |
 
 **The Decision Gate's blocking criteria are met.** See `/docs/IMPLEMENTATION_PLAN.md`.
+
+### ADR-031 — Security headers are split between `next.config.ts` and the middleware
+
+**Status:** Accepted
+**Date:** 2026-08-20   **Decided by:** Engineering (§23)
+
+**Context:** §23 requires CSP, HSTS, `X-Frame-Options: DENY` and
+`X-Content-Type-Options: nosniff` on every production response, and warns in the same breath
+against breaking the application to satisfy a header check. Those two requirements pull apart: a
+Content-Security-Policy worth having carries a per-request nonce, and a per-request value cannot be
+declared statically.
+
+**Decision:** The headers that never vary are declared in `next.config.ts`, so they also cover the
+responses the middleware matcher skips (`_next/static`, images, `favicon.ico`). The CSP is built
+per request in `middleware.ts` from `lib/security-headers.ts`, with a fresh 16-byte nonce, and is
+attached to the *request* as well as the response so Next.js stamps it onto its own bootstrap
+scripts.
+
+`script-src` is `'self' 'nonce-…' 'strict-dynamic'` — no `'unsafe-inline'`, no `'unsafe-eval'`.
+`style-src` keeps `'unsafe-inline'`, because React writes `style` attributes and nonces do not
+apply to style attributes at all; the alternative is not a stricter policy, it is a broken page.
+
+**Consequences:** `/login` had to become `dynamic = 'force-dynamic'`. Statically prerendered, it
+shipped twelve unnonced script tags under a policy where `'strict-dynamic'` causes `'self'` to be
+ignored — so a browser would have blocked every script on the sign-in page while every header check
+passed. This was found by loading the page in a real browser, not by reading the headers, and it is
+the concrete case §23's warning is about. The cost is one render of a static form per sign-in; the
+page could never really be cached anyway, because middleware runs `getUser()` on it.
+
+`scripts/smoke.sh` asserts the nonce is fresh per request *and* present on the page's scripts, so a
+future change that reintroduces the mismatch fails the deployment rather than the product.
+
+**Alternatives considered:** A static CSP with `'unsafe-inline'` — passes any header audit and
+stops nothing, since inline injection is the attack. CSP in report-only mode — reports into a
+collector the frozen stack does not contain. Forcing every route dynamic — pays the cost on 40
+routes to fix two.
+
+### ADR-032 — Outlet scope is evaluated once per query, not once per row
+
+**Status:** Accepted
+**Date:** 2026-08-20   **Decided by:** Engineering (§25)
+**Migrations:** `028_rls_scope_initplan.sql`, `029_rls_readable_sets.sql`
+
+**Context:** Every scoped policy tested `manages_outlet(outlet_id)`, and the readable-parent
+policies tested `owns_opportunity_on_account(id)`, `owns_opportunity_on_project(id)`,
+`can_read_opportunity(...)` and `can_read_account(...)`. All of these take a row column, so the
+planner must call them per row, and each is a `SECURITY DEFINER` function that re-reads
+`public.users` for the caller's role before doing its own lookup.
+
+Measured on a synthetic 20,005 opportunities / 8,004 accounts, as a salesperson:
+
+| Query | Per-row | Per-query |
+|---|---|---|
+| `opportunities` scan | 792 ms | 9.8 ms |
+| `accounts` scan | 3,754 ms | 103 ms |
+| `opportunity_events` scan | 3,277 ms | 14 ms |
+| `search_crm` (name) | 7,299 ms | 245 ms |
+| `find_account_duplicates` | 3,494 ms | 114 ms |
+| `/today` (`v_opportunity_flags`) | 881 ms | 75 ms |
+
+§15.1 already names this fix and applies it to the argument-free helpers — wrap as
+`(select public.fn())` so the planner lifts them into an InitPlan. Its note that "wrapping a
+correlated reference would defeat the point" is true of the wrapping but not of the predicate: the
+scope test does not need a function call per row, it needs set membership against a set built once.
+
+**Decision:**
+
+    manages_outlet(outlet_id)
+      →  (select public.is_owner()) or outlet_id in (select public.scoped_outlet_ids())
+
+    owns_opportunity_on_account(id)
+      →  id in (select public.my_opportunity_account_ids())
+
+    can_read_opportunity(opportunity_id)
+      →  opportunity_id in (select public.readable_opportunity_ids())
+
+    can_read_account(account_id)
+      →  account_id in (select public.readable_account_ids())
+
+`scoped_outlet_ids()` is not new — migration 022 already scopes the management RPCs with it.
+
+The owner test is a **separate disjunct** rather than folded into `scoped_outlet_ids()`, whose
+OWNER branch lists only `is_active` outlets. Collapsing the two would have quietly taken a closed
+outlet's history away from the owner. `tests/integration/rls-scope-equivalence.test.ts` pins that
+case specifically.
+
+`readable_opportunity_ids()` and `readable_account_ids()` are `SECURITY INVOKER`, deliberately.
+A `SECURITY DEFINER` version would have to restate "owner, or outlet scope, or work context" — a
+second copy of the authorization rule, which CLAUDE.md §8 forbids. As `INVOKER` they simply select
+ids and let the parent table's own policy filter them, so the policy remains the single definition
+of who may read a row.
+
+**Consequences:** No rule changed. The whole integration suite — `crm-permissions`,
+`rls-outlet-scope`, `management-scope`, `no-hard-delete` — passed unchanged across both migrations,
+and 22 further assertions were added that compare each new form against the function it replaced,
+role by role, including the deactivated user and ADMIN (ADR-017). `manages_outlet` is kept, with a
+comment saying it must not be used inside a row predicate.
+
+Three OWNER-only report RPCs remain at roughly 0.85–0.91 s at 20,005 opportunities
+(`management_team_workload`, `management_outlet_comparison`,
+`management_quotation_turnaround`). That is about five years of volume for this business, on an
+untuned container, and they are not on the salesperson hot path — recorded rather than optimised,
+because §25 also says not to build for a scale that is not coming.
+
+**Alternatives considered:** Leaving it, since 20 users will not hit 20,000 rows for years — but
+the cost is paid on `/today` from a phone from the first thousand rows, and the fix is one pattern
+the codebase already uses. Rewriting the helpers' bodies instead of the policies — they are still
+called per row, so it treats the symptom. Materialising scope into a table — a cache to invalidate,
+and a twelfth table.
 
 ---
 

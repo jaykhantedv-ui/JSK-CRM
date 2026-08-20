@@ -1,0 +1,112 @@
+# Independent weekly backup (§17).
+#
+# This runs in GitHub Actions rather than in the application because Vercel's
+# runtime has no `pg_dump` and a serverless function is the wrong shape for a job
+# that streams hundreds of megabytes. The destination is the BUSINESS's own AWS
+# account in Mumbai — not Supabase's — so a lost Supabase account, a billing
+# dispute or a vendor outage does not take the data with it.
+#
+# Supabase's own automated backups stay switched on. This is the second copy, and
+# the one nobody but JSK controls.
+#
+# Required repository secrets:
+#   BACKUP_DATABASE_URL   read-capable connection string to the production database
+#   BACKUP_PASSPHRASE     symmetric key for the archive; also kept off-line
+#   AWS_ACCESS_KEY_ID     least-privilege IAM user — PutObject/GetObject on the
+#   AWS_SECRET_ACCESS_KEY prefix and nothing else (no DeleteObject: retention is
+#                         the bucket's lifecycle rule, not this job's business)
+# Required repository variables:
+#   AWS_BACKUP_BUCKET     e.g. jsk-crm-backups
+#   AWS_REGION            must be ap-south-1
+name: Weekly backup
+
+on:
+  schedule:
+    # 18:30 UTC Sunday = 00:00 IST Monday. Cron here is UTC, like Vercel's.
+    - cron: '30 18 * * 0'
+  workflow_dispatch:
+    inputs:
+      label:
+        description: 'Label for this archive (e.g. pre-migration)'
+        required: false
+        default: 'manual'
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    name: pg_dump → encrypt → S3 (ap-south-1)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The dump must be taken by a client at least as new as the server, or
+      # pg_dump refuses. Supabase runs PostgreSQL 15+; 16 covers it.
+      - name: PostgreSQL 16 client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+          pg_dump --version
+
+      - name: Back up
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          BACKUP_DEST: s3://${{ vars.AWS_BACKUP_BUCKET }}/database
+        run: scripts/backup.sh "${{ inputs.label || 'scheduled' }}"
+
+      # A backup job that fails silently is worse than no backup job: the business
+      # believes it is covered. Failing the run is what surfaces on the Actions
+      # page and in the repository's notification settings.
+      - name: Report failure loudly
+        if: failure()
+        run: |
+          echo "::error::Weekly backup FAILED. The business is running on Supabase's" \
+               "automated backups alone until this is fixed. See docs/DEPLOYMENT.md §7."
+          exit 1
+
+  # Quarterly proof that the archives are readable (§18). A backup nobody has ever
+  # restored is a hypothesis.
+  restore-drill:
+    name: Quarterly restore drill
+    needs: dump
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['54322:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PostgreSQL 16 client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+
+      - name: Restore the newest archive into a throwaway database
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          RESTORE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: |
+          LATEST=$(aws s3 ls "s3://${{ vars.AWS_BACKUP_BUCKET }}/database/" \
+            --region "$AWS_REGION" \
+            | grep '\.dump\.enc$' | sort | tail -1 | awk '{print $4}')
+          echo "Restoring $LATEST"
+          scripts/restore.sh "s3://${{ vars.AWS_BACKUP_BUCKET }}/database/$LATEST"

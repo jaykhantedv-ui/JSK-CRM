@@ -1,0 +1,24 @@
+-- 023 — the MERGED opportunity event (Master Phase 4, ADR-008)
+--
+-- Account merge moves an opportunity from one account to another. §9.2 requires
+-- every system-recorded change to an opportunity to appear in
+-- `opportunity_events`, and CLAUDE.md §13 requires the trigger on `opportunities`
+-- to stay the SINGLE WRITER of that table — so the merge cannot simply insert its
+-- own audit row, and none of the eight existing event types means "this
+-- opportunity was moved to another customer record".
+--
+-- ADR-008 makes account merge irreversible in V1. That raises the bar on the
+-- audit rather than lowering it: what the merge moved has to be recoverable by
+-- reading, even though the move itself cannot be undone.
+--
+-- ONE MIGRATION FOR ONE ENUM VALUE, on purpose. PostgreSQL refuses to use a new
+-- enum value inside the transaction that added it, and the Supabase CLI applies
+-- each migration file in its own transaction. Adding the value here and casting
+-- to it in 025 keeps those two events in separate transactions, which is what
+-- makes the sequence safe to apply from empty in one pass.
+--
+-- No twelfth table (§4.1). No merge-history subsystem — the event row on each
+-- moved opportunity carries source, target and reason in `metadata`, which is
+-- the audit ADR-008 asks for and nothing more.
+
+alter type public.opportunity_event_type add value if not exists 'MERGED';

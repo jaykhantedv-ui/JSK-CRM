@@ -4,8 +4,15 @@ PostgreSQL 15+ on Supabase, region **Mumbai `ap-south-1`** (TODO-BD-08).
 Authoritative schema: `CLAUDE_CODE_BUILD_SPEC.md` §5, §6. This document is a working reference —
 **§5 wins any disagreement, except where an approved deviation is recorded below.**
 
-**Nothing has been built yet.** Migrations are Phase 3 of `/docs/IMPLEMENTATION_PLAN.md`, and
-Phase 3 does not start until the **Decision Gate** passes.
+**Status: built and verified.** All twenty-nine migrations apply cleanly from an empty database,
+twice in a row producing a byte-identical schema, and are exercised by 425 integration tests
+against a real PostgreSQL 16 server (ADR-018). `src/types/database.types.ts` is generated from that
+verified database and is byte-compared against it in CI.
+
+Migrations **028** and **029** change the *shape* of thirteen RLS policies without changing what
+any of them decides: outlet scope and readability are now evaluated once per query instead of once
+per row. The rule, the roles and the results are identical — see ADR-032 for the measurements and
+`tests/integration/rls-scope-equivalence.test.ts` for the proof.
 
 **Approved corrections and deviations applied to this schema:** 2026-08-19, Project Owner.
 Full reasoning in `/docs/SPEC_AUDIT.md`; ADRs in `/docs/DECISIONS.md` §B.
@@ -25,6 +32,8 @@ Full reasoning in `/docs/SPEC_AUDIT.md`; ADRs in `/docs/DECISIONS.md` §B.
 - **Money is `bigint` paise** — never float, never rupees in the database.
 - All timestamps are `timestamptz`, stored UTC. **All business-day logic converts to
   Asia/Kolkata explicitly** (B-10).
+- `created_at` defaults to `now()` — **except on `opportunity_events`, which uses
+  `clock_timestamp()`** so events written in one transaction stay orderable (ADR-019).
 
 > **M-08 resolved.** §5.0's "every table has …" is not literally true of the DDL —
 > `system_settings` has a `text` primary key and no `created_at`/`created_by`;
@@ -34,11 +43,13 @@ Full reasoning in `/docs/SPEC_AUDIT.md`; ADRs in `/docs/DECISIONS.md` §B.
 
 ---
 
-## The eleven tables (§4.1)
+## The thirteen tables (§4.1 + ADR-016)
 
 | Table | Archivable | Deletable | Purpose |
 |---|---|---|---|
 | `users` | no (`is_active`) | **no** | Internal application users; mirrors Supabase `auth.users` |
+| `outlets` | no (`is_active`) | **no** | **ADR-016.** A branch/showroom. Rows, not a text column |
+| `user_outlets` | no (`revoked_at`) | **no** | **ADR-016.** A user's outlet scope — zero, one or many |
 | `accounts` | **yes** | **no** | The permanent customer relationship (individual or firm) |
 | `contacts` | **yes** | **no** | People — attached to an account, or independent |
 | `projects` | **yes** | **no** | A physical site |
@@ -50,8 +61,24 @@ Full reasoning in `/docs/SPEC_AUDIT.md`; ADRs in `/docs/DECISIONS.md` §B.
 | `import_batches` | no | **no** | One row per CSV import run |
 | `import_rows` | no | **no** | Staged rows with validation and duplicate analysis |
 
-**Eleven tables, no more.** ADR-008 explicitly declined a twelfth table for merge history.
-Adding one requires approval recorded in `/docs/DECISIONS.md` before the migration is written.
+**Thirteen tables.** The spec's model is eleven; **ADR-016 adds `outlets` and `user_outlets`**,
+approved before the migration was written, because `branch text not null default 'MAIN'` cannot
+give an outlet an identity, an assignment or a deactivation — and the business needs all three
+(two outlets now, five to ten expected; managers holding zero, one or several).
+
+Both additions are **organizational structure, not CRM business records**: no money, no pipeline
+stage, no ownership. §4.2's rejected tables stay rejected, and ADR-008's refusal of a merge-history
+table stands. Adding a fourteenth still requires approval recorded in `/docs/DECISIONS.md` before
+the migration is written.
+
+### `branch` is retired (ADR-016, supersedes TODO-BD-12)
+
+`users.branch`, `accounts.branch`, `projects.branch` and `opportunities.branch` **do not exist**.
+On `users` the replacement is the `user_outlets` link; on the three business tables it is
+`outlet_id uuid not null references public.outlets(id)`.
+
+Two competing notions of "which shop is this?" were explicitly ruled out, so nothing in the schema
+or the code may reintroduce `branch`.
 
 ### The one delete exception — ADR-004 (B-08 resolved)
 
@@ -61,7 +88,12 @@ ownership, no money. `removeProjectStakeholder()` deletes it.
 
 **No `archived_at` column is added**, so §5.6's three partial unique indexes stay exactly as
 specified. A reviewer should be able to grep for `for delete` and find exactly one policy.
-An integration test asserts DELETE fails on all ten other tables, for every role.
+`tests/integration/no-hard-delete.test.ts` asserts DELETE fails on **all twelve other tables, for
+every role**, and that `authenticated` holds the DELETE privilege on nothing else.
+
+Moving a user between outlets therefore sets `user_outlets.revoked_at` rather than deleting the
+row: it keeps the no-hard-delete rule intact, keeps this the only DELETE policy, and leaves an
+auditable record of when somebody's scope changed.
 
 ---
 
@@ -145,17 +177,24 @@ intended behaviour — such a record answers none of §1.2's five questions.
 
 ---
 
-## Columns added beyond §5
+## Columns changed beyond §5
 
-Exactly one, under an approved ADR.
+Each under an approved ADR. Nothing else is added: §5.5's "Do not add fields not listed" holds
+everywhere else, and §17.6's future-proofing list is closed.
 
 | Column | Table | Source | Why |
 |---|---|---|---|
 | `sla_notified_at timestamptz` | `opportunities` | **ADR-002** (B-05) | The §14.2 SLA reminder must fire once per opportunity, and the "event metadata" key it names cannot exist: §4.2 rejects a notifications table, the event enum has no notification value, and event rows cannot be updated. Without state the reminder re-sends **every hour, forever**. Null = not yet notified. **Not user-writable through any policy.** |
+| `outlet_id uuid not null` | `accounts`, `projects`, `opportunities` | **ADR-016** | Replaces `branch text`. `not null` on purpose: a record belonging to no outlet would be invisible to every manager, which is the accountability gap the CRM exists to close. |
+| *(removed)* `branch text` | `users`, `accounts`, `projects`, `opportunities` | **ADR-016** | Free text cannot carry identity, assignment or deactivation. |
 
-Nothing else is added. §5.5's "Do not add fields not listed" holds everywhere else, and §17.6's
-future-proofing list is closed. One **constraint** is added beyond §5 — `account_reachable`
-(ADR-013) — and two **settings keys** — the ADR-014 maintenance counters.
+One **constraint** is added beyond §5 — `account_reachable` (ADR-013) — and two **settings keys**,
+the ADR-014 maintenance counters.
+
+**No length checks were added.** §5 specifies exactly two — `accounts.name >= 2` and
+`activities.summary >= 3` — and only those two exist. A first pass added them to `users.full_name`,
+`contacts.full_name`, `projects.name` and `opportunities.title`; they were removed, because a
+constraint the spec did not ask for is scope the spec did not ask for.
 
 ---
 
@@ -165,10 +204,14 @@ future-proofing list is closed. One **constraint** is added beyond §5 — `acco
 |---|---|---|
 | `normalize_phone(text)` | Strips spaces, dashes, brackets, leading `+91`/`91`/`0`; returns the trailing 10 digits, or null if fewer than 10 remain | **Declared `IMMUTABLE` and genuinely deterministic** — regex/`translate` only, no locale- or configuration-dependent calls. Required by the generated columns (B-06). |
 | `touch_updated_at()` | Sets `new.updated_at = now()` | Attached to every table with the column |
-| `log_opportunity_event()` | Writes `opportunity_events` rows on insert, stage change and owner change | `SECURITY DEFINER`. **Reads `app.event_reason`** to attach the reason (ADR-001). **Resolves the actor as `coalesce(auth.uid(), new.created_by, <system user uuid>)`** (ADR-003). **Maintains `stage_changed_at`** on every stage change (H-01). Guarantees no path bypasses the audit. |
-| `user_role()`, `is_manager_or_above()`, `is_owner_or_admin()`, **`can_reassign()`** | Role resolution inside RLS policies without recursion | `SECURITY DEFINER`, `stable`, `set search_path = public`. **`can_reassign() = MANAGER, OWNER` — ADMIN excluded** (H-05). Created **before** the business tables (B-04). |
-| `owns_opportunity_on_account/project(uuid)`, **`can_see_account/project/opportunity/activity(uuid)`** | Work-context and visibility predicates | `SECURITY DEFINER` so they do not re-enter the policies they support (H-12). Created **after** the tables they reference (B-04). |
-| `reassign_opportunity(...)` | Ownership change | `SECURITY DEFINER` RPC gated on `can_reassign()`. **The §15.5 fallback `with check` is invalid SQL and recursive and must never be written** (B-02). |
+| `system_user_id()` | The fixed uuid of the automated-write actor | `IMMUTABLE`. Exists so the uuid appears in SQL once and never as a constant in application code (ADR-003). |
+| `log_opportunity_event()` | Writes `opportunity_events` on insert, stage change, owner change and archive/restore | `SECURITY DEFINER`. **Reads `app.event_reason`** for the reason (ADR-001). **Resolves the actor as `coalesce(auth.uid(), new.created_by, system_user_id())`** (ADR-003). Emits `REOPENED` for `won → qualified` (ADR-007) and `ARCHIVED`/`RESTORED` (M-24). The single writer, so no path bypasses the audit. |
+| `current_user_id()` | The caller's id, **only while `is_active`** | `SECURITY DEFINER`. Every ownership test in every policy goes through this rather than `auth.uid()`, so deactivation takes effect at the database boundary instead of when the JWT expires up to an hour later. |
+| `user_role()`, `is_owner()`, `is_owner_or_admin()`, `is_manager_or_above()` | Role resolution inside RLS without recursion | `SECURITY DEFINER`, `stable`, `set search_path = ''`. **`is_manager_or_above() = MANAGER, OWNER` — ADMIN excluded** (ADR-017, which subsumes H-05: with ADMIN out, a separate `can_reassign()` would be a redundant alias). |
+| `manages_outlet(uuid)`, `manages_user(uuid)` | Outlet scope (ADR-016) | OWNER is true for every outlet **by role**, deliberately not by membership — enumerating outlets for the owner would silently narrow their access the day an outlet is added. A MANAGER with an empty scope manages nothing. |
+| `owns_opportunity_on_account/project(uuid)`, `can_read_account/project/opportunity(uuid)`, `can_write_project(uuid)` | Work-context and parent-entity visibility | `SECURITY DEFINER` so they do not re-enter the policies they support (H-12). Created **after** the tables they reference (B-04). They mirror the SELECT policies exactly; changing one without the other is a defect. |
+| `guard_record_scope()` | Refuses an outlet move or an archive by somebody not entitled to it | `BEFORE UPDATE` on `accounts`, `projects`, `opportunities`. A trigger rather than a `WITH CHECK`, because the rule compares OLD to NEW and a policy subquerying its own table would recurse. Returns early when `auth.uid()` is null, so service-role callers — which already bypass RLS — are not blocked. |
+| `reassign_opportunity(...)` | Ownership change | **Not yet written** — it arrives with the reassignment feature. Reassignment is already *denied* to a salesperson by the `opportunities` UPDATE policy, whose `WITH CHECK` the row fails once `owner_id` is somebody else. **The §15.5 fallback `with check` is invalid SQL and recursive and must never be written** (B-02). |
 
 Generated columns: `accounts.phone_normalized`, `accounts.email_normalized`,
 `contacts.phone_normalized` — `generated always as (…) stored`.
@@ -291,63 +334,117 @@ values in application code** — resolution fixed the values, not the mechanism 
 
 ---
 
-## Migration order — corrected
+## Migration order — as built
 
 The §5.12 sequence with the approved corrections applied. **RLS is enabled in each table's own
-migration** (H-04), not deferred to 015.
+migration** (H-04); the policies are collected in 016 so the authorization model reads as one
+document, and 016 re-asserts RLS and fails loudly if a table ever arrives without it.
 
 ```
-001_extensions_and_helpers   pgcrypto, pg_trgm, normalize_phone() IMMUTABLE (B-06), touch_updated_at()
+001_extensions_and_helpers   pgcrypto, pg_trgm (schema `extensions`)
+                             normalize_phone() IMMUTABLE (B-06), touch_updated_at()
 002_enums                    all enum types — lowercase opportunity_stage preserved (M-23)
-003_users                    users + trigger + handle_new_auth_user() + RLS
-                             enumerated SELECT/INSERT/UPDATE, NO "for all", NO delete (H-06)
-004_import                   import_batches, import_rows + RLS
-005_accounts                 accounts WITHOUT referred_by_contact_id FK (B-07)
-                             + account_reachable check constraint (ADR-013) + RLS
-006_contacts                 contacts + RLS
-007_accounts_fk              alter table accounts add constraint … references contacts (B-07)
-008_projects                 projects + RLS
-009_project_stakeholders     + three partial unique indexes + RLS incl. the ADR-004 DELETE policy
-010_opportunities            + check constraints (quoted_requires_quotation narrowed, ADR-006)
-                             + sla_notified_at (ADR-002) + indexes + RLS
-011_activities               activities + RLS (24-hour author edit window)
-012_opportunity_events       + log_opportunity_event(): app.event_reason GUC (ADR-001),
-                               system-user actor (ADR-003), stage_changed_at (H-01)
-                             + RLS: no UPDATE, no DELETE, for anyone
-013_system_settings          + seed rows incl. the ADR-014 maintenance counters — BEFORE its consumers (H-03)
-0xx_rls_helpers_role         user_role, is_manager_or_above, is_owner_or_admin, can_reassign (B-04, H-05)
-0xx_rls_helpers_context      owns_opportunity_on_*, can_see_* (B-04, H-12)
-0xx_reassign_opportunity     SECURITY DEFINER RPC gated on can_reassign() (B-02)
-0xx_flags_view               v_opportunity_flags, security_invoker = true, IST dates (B-10), coalesce (M-07)
-0xx_system_user_seed         the automated-write actor, is_active = false (ADR-003)
-015_rls_policies             AUDIT / HARDENING pass — policies already exist per table (H-04)
-016_storage                  Supabase Storage bucket + policies using can_see_* (H-12)
-017_seed                     owner user, settings, sample data (dev only)
+003_users                    users + touch trigger + system_user_id() + the seeded system actor
+                             (ADR-003) + handle_new_auth_user() (ADR-009) + RLS on
+                             NO `branch` column (ADR-016)
+004_outlets                  outlets + user_outlets + partial unique index + RLS on   [ADR-016]
+005_import                   import_batches, import_rows + RLS on
+006_accounts                 accounts WITHOUT referred_by_contact_id (B-07)
+                             + account_reachable (ADR-013) + outlet_id (ADR-016) + RLS on
+007_contacts                 contacts + RLS on
+008_accounts_fk              alter table accounts add referred_by_contact_id … references contacts (B-07)
+009_projects                 projects + outlet_id + RLS on
+010_project_stakeholders     + three partial unique indexes + RLS on
+011_opportunities            + check constraints (quoted_requires_quotation narrowed, ADR-006)
+                             + sla_notified_at (ADR-002) + outlet_id + indexes + RLS on
+012_activities               activities + RLS on
+013_opportunity_events       + log_opportunity_event(): app.event_reason GUC (ADR-001),
+                               system-actor fallback (ADR-003), REOPENED (ADR-007),
+                               ARCHIVED/RESTORED (M-24) + RLS on
+014_system_settings          + seed rows incl. the ADR-014 maintenance counters — BEFORE its
+                               consumers (H-03) + RLS on
+015_rls_helpers              current_user_id(), user_role(), is_owner(), is_owner_or_admin(),
+                             is_manager_or_above(), manages_outlet(), manages_user(),
+                             owns_opportunity_on_*(), can_read_*/can_write_project(),
+                             guard_record_scope() + execute grants (B-04, H-05, H-12)
+016_rls_policies             all policies + grants + the RLS-enabled assertion (H-04)
+017_views                    v_opportunity_flags, security_invoker = true, IST dates (B-10),
+                             coalesce on the flag booleans (M-07)
 ```
 
-`accounts` and `contacts` are mutually referential; **005 → 006 → 007 breaks the cycle. Do not
+**Master Phase 2 adds three:**
+
+```
+018_system_maintained_columns   touch_stage_changed_at(), touch_last_activity_at(),
+                                apply_won_account_status() — the three denormalised columns move
+                                from "the service remembers" to "the database maintains" (ADR-020)
+019_crm_rpcs                    raise_not_found(), create_account_with_opportunity() (§11.1),
+                                log_activity() (§10.2), change_opportunity_stage() (§9.3),
+                                reassign_opportunity() (§11.9, closes B-02), bulk_reassign()
+                                — every one SECURITY INVOKER, so RLS still decides (§16.3)
+020_search_and_duplicates       like_escape(), search_crm() (§11.10),
+                                find_account_duplicates() (§8.9) — SECURITY INVOKER, so a record
+                                the caller cannot open is never in the result
+```
+
+The similarity thresholds of §8.9 are **parameters** of `find_account_duplicates`, not literals in
+the migration: `lib/duplicates.ts` holds them once and passes them in, so the numbers cannot drift
+apart. The transition matrix is likewise **not** restated in SQL — it lives in
+`lib/opportunity/transitions.ts` and is validated there (CLAUDE.md §13); the check constraints
+remain the backstop.
+
+`accounts` and `contacts` are mutually referential; **006 → 007 → 008 breaks the cycle. Do not
 attempt a single migration for both** (§5.12, §25).
 
-### The five ordering corrections
+**Not yet written**, because no phase to date builds it: the Storage bucket and its policies
+(§15.6). The `reassign_opportunity` RPC (B-02) **is now written**, in 019 — it arrived with the
+feature, as planned. Reassignment was already *denied* to a salesperson by the `opportunities`
+UPDATE policy; the RPC is the manager-side path, and it exists as an RPC rather than a plain
+update because ADR-001's reason GUC and the update itself must share one transaction. Dev seed data lives in `/supabase/seed/dev-fixtures.sql`, not in a migration.
+
+### The ordering corrections
 
 1. **B-07** — §5.3's DDL declares `referred_by_contact_id … references public.contacts(id)`
-   **inline**, which cannot execute at 005. Create the column bare in 005; add the FK by
-   `alter table` in 007. **Do not paste §5.3 verbatim.**
-2. **B-04** — helper functions are split. `owns_opportunity_on_*` and `can_see_*` are `language sql`
-   bodies selecting from tables PostgreSQL validates at creation time, so they cannot exist before
-   those tables. Role helpers go first, context helpers after.
-3. **B-06** — `normalize_phone()` must be `IMMUTABLE` or the generated columns in 005/006 fail with
+   **inline**, which cannot execute at 006. Create the column by `alter table` in 008.
+   **Do not paste §5.3 verbatim.**
+2. **B-04** — helper functions are split by dependency. `owns_opportunity_on_*` and `can_read_*`
+   select from tables PostgreSQL validates at creation time, so they cannot exist before those
+   tables. They live in 015, after every table.
+3. **B-06** — `normalize_phone()` must be `IMMUTABLE` or the generated columns in 006/007 fail with
    *"generation expression is not immutable"*.
-4. **H-03** — `013_system_settings` is applied **before** the services that read it. §22's
-   assignment of 013 to Phase 7 contradicted Phases 5–6's need for it. Phase assignments must
-   never contradict numeric migration order, and **an extension of an applied migration is always
-   a new numbered file** (§21.2), never an edit.
-5. **H-04** — RLS is enabled per table, in that table's migration. A single 015 as the first place
-   RLS exists would leave every intermediate environment fully readable and writable by any
-   authenticated user. 015 becomes an audit/hardening pass.
+4. **H-03** — `014_system_settings` is applied **before** the services that read it.
+5. **H-04** — RLS is enabled per table, in that table's migration. A single late migration as the
+   first place RLS exists would leave every intermediate state unprotected. 016 keeps the policies
+   and re-asserts the flag.
+
+### A third defect, found in Master Phase 2 — recency never moved for shared accounts
+
+`accounts.last_activity_at` was to be written by the service. It cannot be: a salesperson may log
+an activity against an account they do not own (the §3.2 work-context rule, permitted by
+`activities_insert`), but `accounts_update` requires ownership or outlet management, so the
+service's update matched **zero rows and silently succeeded**. Recency on Customer 360 — and every
+dormancy query built on it — would have stopped moving for exactly the collaborative accounts
+where activity matters most. Fixed by the SECURITY DEFINER trigger in 018; see **ADR-020**, which
+also covers `stage_changed_at` and the `won → accounts.status` side effect for the same reason.
+
+### Two defects found by running the migrations
+
+Both were caught by the integration suite on a real database, and both would have shipped if the
+SQL had only been read rather than executed. They are recorded because they are exactly what
+runtime verification is for.
+
+1. **`log_opportunity_event()` rejected every stage change.** The event type came from a `CASE`
+   whose branches are all string literals, which resolves to `text` — and PostgreSQL has no
+   implicit text-to-enum cast. The first stage change any user made would have failed. Fixed by
+   casting the `CASE` result to `opportunity_event_type`.
+2. **`guard_record_scope()` blocked service-role writes.** The trigger enforces the outlet and
+   archive rules for user sessions, but it fired for callers with no `auth.uid()` too — cron
+   routes and the import executor — which already bypass RLS by design. Fixed by returning early
+   when `auth.uid()` is null.
 
 **Never edit a migration that has been applied to any shared environment — write a new one**
-(§21.2). Never modify schema through the Supabase dashboard.
+(§21.2). These corrections were made **before** any shared environment existed. Never modify
+schema through the Supabase dashboard.
 
 ---
 
@@ -390,9 +487,13 @@ Every archivable table indexes `owner_id`, and hot filters are **partial indexes
 `(owner_id, stage)`, `next_action_date`, `(stage, stage_changed_at)`, `expected_close_date`,
 plus `opp_unassigned` and `opp_missing_next_action`.
 
-**M-19 resolved — performance.** The work-context RLS helpers are `EXISTS` subqueries evaluated
-per candidate row. **Wrap each call as `(select public.fn(...))`** in policies so PostgreSQL caches
-it as an InitPlan, and confirm the supporting indexes are used. This is the main threat to §12.8's
+`outlet_id` is indexed on all three outlet-scoped tables, partial on `archived_at is null`, because
+it is now in the read path of every manager query.
+
+**M-19 applied — performance.** Argument-free helpers are called as `(select public.fn())` in every
+policy so PostgreSQL evaluates them once per query as an InitPlan rather than once per row. Helpers
+taking a row column — `manages_outlet(outlet_id)`, `can_read_account(account_id)` — are called
+directly, because wrapping a correlated reference defeats the point. This is the main threat to §12.8's
 400 ms and §23.6's 20,000-opportunity gate, and it is **measured in Phase 5, not discovered in
 Phase 20**.
 
@@ -413,7 +514,22 @@ Phase 20**.
 
 ## Open database questions — none
 
-Every schema question is closed. For the record:
+### P1-05 — closed by ADR-019
+
+`opportunity_events.created_at` defaults to **`clock_timestamp()`**, not `now()`.
+
+`now()` is transaction start time, so with §16.3 running `changeOpportunityStage`, `logActivity`
+and `bulkReassign` as single transactions, several events routinely shared one timestamp and
+`(opportunity_id, created_at desc)` — the index §5.9 specifies precisely so the trail can be read
+in order — could not separate them. `clock_timestamp()` records when each event actually happened.
+
+This is the **only** column in the schema that uses it, and the difference is deliberate:
+everywhere else `created_at` means *when this row's transaction began*, and on the audit trail it
+means *when this event occurred*. Nothing else about the audit model changed.
+
+### Closed### Closed
+
+For the record:
 
 | Ref | Answer |
 |---|---|
@@ -422,3 +538,117 @@ Every schema question is closed. For the record:
 | **H-11 sub** | **`accounts.status` is not changed** when a won opportunity is reopened — the account may hold other WON opportunities. Service-layer, no schema impact. |
 | **§14.6 state** | `maintenance_consecutive_failures` + `maintenance_last_failure_at` in `system_settings` (ADR-014). |
 | **TODO-BD-06 seed** | The ten revenue taluks above; Chennimalai corrected to a block/firka under Perundurai. |
+
+
+---
+
+## Master Phase 3 — management intelligence (migrations 021, 022)
+
+### 021 — `sales_targets`, the fourteenth table
+
+Approved as **ADR-021** before the migration was written (CLAUDE.md §4). The reason it could not be
+a `system_settings` key is not stylistic: `system_settings_select` grants every authenticated user
+read on every row, so a target stored there would publish the company's figure — and every
+salesperson's individual figure — to every salesperson through one PostgREST call.
+
+| Column | Notes |
+|---|---|
+| `period_month` | `date`, always a month start. `target_period_is_month_start` enforces it. |
+| `outlet_id` | Null = company-wide. |
+| `user_id` | Null = the whole outlet. `target_user_requires_outlet` forbids a person without a branch. |
+| `target_paise` | `bigint`, `>= 0`. **Zero is how a target is withdrawn** — there is no DELETE. |
+
+Three **partial** unique indexes, one per scope. A plain three-column unique constraint would not
+work: `null` is distinct from `null` in a unique index, so duplicate company rows would be legal.
+
+RLS reads scope straight off `outlet_id` — `null` → `is_owner()`, otherwise
+`manages_outlet(outlet_id)`. SALESPERSON and ADMIN match neither branch. `guard_target_scope()`
+mirrors `guard_record_scope()`: the UPDATE policy's WITH CHECK only proves the caller manages the
+**destination** branch, so without the trigger a manager of two branches could re-point one
+branch's target at the other and erase it from the first branch's reporting.
+
+**No DELETE policy.** The schema still holds exactly one, on `project_stakeholders` (ADR-004), and
+`tests/integration/service-contracts.test.ts` asserts that.
+
+### 022 — the management analytics functions
+
+Thirteen aggregate functions plus two helpers, all **SECURITY INVOKER** so RLS is evaluated exactly
+as it is for a table read (ADR-022).
+
+| Function | Answers |
+|---|---|
+| `assert_management_access()` | Refuses SALESPERSON and ADMIN at the database boundary. |
+| `scoped_outlet_ids()` | Which branches may this caller compare. OWNER → every **active** branch, by role. |
+| `management_pipeline_by_stage` | Count, value and weighting per stage. |
+| `management_exceptions` | The eight counts of §13.3 Panel A, in one row. |
+| `management_period_summary` | Won, lost, new enquiries, quoted value for a period. |
+| `management_team_workload` | One row per salesperson in scope, including those with nothing. |
+| `management_outlet_comparison` | One row per branch in scope. |
+| `management_lost_reasons` | Count and value by reason. |
+| `management_quote_conversion` | Reached-quoted, won-after-quote, and wins that never were quoted. |
+| `management_quotation_turnaround` | Qualified→quoted days, **plus what it could not measure**. |
+| `management_won_by_month` | The trend series, bucketed at Asia/Kolkata, empty months as zeros. |
+| `management_at_risk` | The at-risk set, paginated, with the raw signals for `classifyRisk()`. |
+| `management_customer_sales` / `management_project_sales` | Rollups per customer and per project. |
+| `management_site_visits` | `activities` where `type = 'SITE_VISIT'`. **No site-visits table exists.** |
+
+Four properties worth knowing before editing the file:
+
+1. **Every body is `plpgsql`, not `sql`.** The gate has to run whether or not the query matches a
+   row. As a WHERE predicate in a `language sql` body it is subject to the planner — against a
+   caller who can see nothing, the scan yields nothing and the gate may never be evaluated.
+   `perform` on the first line is unconditional.
+2. **No threshold is written in the file.** Stall days, dormancy days, the high-value threshold and
+   the stage probabilities all arrive as parameters from `services/settings.service.ts`.
+3. **Period boundaries arrive as instants** from `lib/dates.ts`. Where SQL buckets by month it does
+   so explicitly at `Asia/Kolkata`.
+4. **`p_limit` is capped at 1000**, which is `max_rows` in `supabase/config.toml`. PostgREST
+   truncates beyond that silently, so a higher ceiling would be a lie. `EXPORT_ROW_LIMIT` is the
+   same number for the same reason; if `max_rows` changes, both change with it.
+
+Grants are made **function by function**. A blanket `grant execute on all functions in schema
+public` re-exposed the SECURITY DEFINER trigger functions migration 018 had deliberately revoked —
+`tests/integration/service-contracts.test.ts` caught it.
+
+
+---
+
+## Migrations 023–027 — Master Phase 4
+
+| # | File | What it adds | Why a new number |
+|---|---|---|---|
+| 023 | `merge_event_type.sql` | `MERGED` on `opportunity_event_type` | PostgreSQL refuses to **use** a new enum value inside the transaction that added it, and the CLI applies each file in its own transaction. Alone, so 025 can cast to it. |
+| 024 | `storage.sql` | Private `crm-files` bucket · `safe_uuid`, `can_read_activity`, `can_read_storage_path`, `can_write_storage_path` · policies on `storage.objects` · `opportunities.quotation_file_paths` · **`v_opportunity_flags` recreated** | New objects |
+| 025 | `operations_rpcs.sql` | `import_rollback_days` · `archive_account` / `restore_account` · `count_live_account_children` · `merge_accounts` · `execute_import` · `rollback_import` · trigger extended for `MERGED` | New objects |
+| 026 | `contacts_import_columns.sql` | `contacts.is_imported`, `legacy_ref`, `import_batch_id` + indexes | **Defect fix, forward.** 007 had been applied; H-03 and §21.2 require a new number |
+| 027 | `maintenance.sql` | `maintenance_excluded_batches` · `run_maintenance` | New objects |
+
+### Storage authorization is the path prefix
+
+`crm-files/{account|project|opportunity|activity}/{id}/{uuid}-{filename}`
+
+`can_read_storage_path()` splits the name, refuses anything whose second segment is not a uuid or
+whose first is not one of the four kinds — **there is no default-allow branch** — and otherwise
+delegates to the same `can_read_*` helper the table policies use. A file is therefore visible to
+exactly the people who can see the entity it hangs off, and the service that issues signed URLs
+cannot drift away from that rule because it is not the one enforcing it.
+
+`can_write_storage_path()` is deliberately the **same** rule rather than §15.6's literal "any
+authenticated user may INSERT": a user who cannot see an opportunity has no business writing into
+its folder, and the object would then be readable by everyone entitled to that record.
+
+**No DELETE policy on `storage.objects`.** A reviewer grepping the schema for `for delete` still
+finds exactly one policy, on `project_stakeholders` (ADR-004).
+
+### Two things worth knowing before editing this schema
+
+**`v_opportunity_flags` is `select o.*`, and PostgreSQL expands that star at creation time.** A
+column added to `opportunities` afterwards does **not** appear in the view — silently, with no
+error anywhere. Migration 024 recreates the view in the same file that adds
+`quotation_file_paths`. Any future column on `opportunities` must do the same, or every screen
+reading through the flags view will be missing it.
+
+**`now()` is transaction start time.** `rollback_import` decides "has this been edited?" with
+`updated_at > completed_at`, which is exact across transactions and deliberately equal within one —
+the import's own writes must not count as edits. A test that imports and edits inside a single
+transaction has to backdate `completed_at` to reproduce the gap that exists in reality.

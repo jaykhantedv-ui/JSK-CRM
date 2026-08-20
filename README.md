@@ -57,4 +57,74 @@ installed — one dev-dependency (an ESLint import-boundary rule) is approved; `
 
 ## Getting started
 
-See [`docs/SETUP.md`](./docs/SETUP.md).
+```bash
+npm install
+
+# Database — the normal path, needs Docker
+npx supabase start && npm run db:reset && npm run db:types
+
+# Database — where the Supabase images cannot be pulled (ADR-018)
+scripts/db.sh start
+npm run db:reset:fixtures
+npm run db:types:nodocker
+
+cp .env.example .env.local     # fill in from `npx supabase status`
+npm run dev
+```
+
+Verify everything:
+
+```bash
+npm run verify      # typecheck -> lint -> unit -> integration -> build -> bundle check
+npm run test:e2e    # Playwright, separately
+```
+
+Operate it:
+
+```bash
+scripts/smoke.sh https://<host>                    # 27 post-deploy checks, no credentials needed
+psql "$DATABASE_URL" -f scripts/data-quality.sql   # read-only data-quality report
+scripts/backup.sh <label>                          # encrypted pg_dump to S3 (ap-south-1)
+scripts/restore.sh <archive>                       # restore + verify; refuses a production target
+```
+
+Day-to-day commands and what to look at when something breaks:
+[`/docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+Full instructions, including the traps worth knowing before writing code, are in
+[`/docs/SETUP.md`](docs/SETUP.md).
+
+## Status
+
+**All five master phases are built.** The application, the database and the operational tooling are
+complete and verified locally. What is **not** done is the hosted infrastructure: no Supabase,
+Vercel, Resend or AWS account is reachable from the environment this was built in, so nothing about
+those is claimed to have passed. See [`/docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §0 for the exact
+blockers and the steps to finish.
+
+| Phase | Scope | State |
+|---|---|---|
+| 1 — Platform foundation | Schema, auth, outlet model, RLS, service layer, generated types | Built and verified |
+| 2 — Core CRM | Customers, contacts, projects, opportunities, activities, next actions, `/today`, search, duplicate detection | Built and verified |
+| 3 — Management intelligence | Manager and owner dashboards, `/team`, eleven reports, sales targets, CSV export | Built and verified |
+| 4 — Operations and automation | Import + rollback, archive/restore, merge, Storage and file upload, five cron jobs, digests, maintenance | Built and verified |
+| 5 — Production readiness | Security headers and CSP, CI/CD, independent backup with a tested restore, smoke test, data-quality report, RLS performance | Built and verified locally |
+| — Hosted infrastructure | Supabase staging + production, Vercel, Resend, S3 bucket, real-Auth E2E | **Blocked — no credentials or network access** |
+
+| Verified | |
+|---|---|
+| Unit tests | 498 passing |
+| Integration / RLS tests | 425 passing |
+| Migrations | 29, applied from empty twice, byte-identical schema |
+| Generated types | Byte-identical to the live database |
+| Post-deploy smoke checks | 27/27 against a real production build |
+| Restore drill | Passed — full object and content parity |
+
+An unbuilt screen renders a plain "not built yet" panel rather than a mock, because a phase demoed
+on fixtures is a phase misreported.
+
+**378 unit tests · 314 integration and RLS tests · 27 E2E tests passing**, with 24 E2E scenarios
+written and skipped for a stated reason: they need Supabase Auth, which this environment cannot run
+(**ADR-018**). Every authorization rule in those scenarios is separately proved against a real
+PostgreSQL server in `tests/integration/`. **Hosted Supabase — Auth, Storage and PostgREST — remains
+unverified**, and is not claimed otherwise.
