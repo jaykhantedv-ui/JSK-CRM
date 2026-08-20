@@ -475,3 +475,40 @@ the schema is still `project_stakeholders` (ADR-004).
 `maintenance_last_failure_at` are written only by the maintenance cron (ADR-014) and are excluded
 from `EDITABLE_SETTING_KEYS`. `/settings` displays them and offers no reset — an administrator
 must not be able to silence a failing job instead of fixing it.
+
+---
+
+## Policy shape — how often the rule is asked (028, 029)
+
+**No rule on this page changed.** Migrations 028 and 029 changed only how often the planner
+evaluates them, because outlet scope was costing 792 ms on 20,005 opportunities and the accounts
+list 3,754 ms, paid on `/today` from a salesperson's phone.
+
+| Was — evaluated per row | Is — evaluated once per query |
+|---|---|
+| `manages_outlet(outlet_id)` | `(select is_owner()) or outlet_id in (select scoped_outlet_ids())` |
+| `owns_opportunity_on_account(id)` | `id in (select my_opportunity_account_ids())` |
+| `owns_opportunity_on_project(id)` | `id in (select my_opportunity_project_ids())` |
+| `can_read_opportunity(opportunity_id)` | `opportunity_id in (select readable_opportunity_ids())` |
+| `can_read_account(account_id)` | `account_id in (select readable_account_ids())` |
+
+Two things about this are load-bearing:
+
+**The owner test is a separate disjunct.** `scoped_outlet_ids()`'s OWNER branch lists only
+`is_active` outlets. Folding the owner case into it would have quietly taken a **deactivated**
+outlet's history away from the owner — so `is_owner()` is tested on its own, and
+`rls-scope-equivalence.test.ts` pins that case.
+
+**`readable_opportunity_ids()` and `readable_account_ids()` are `SECURITY INVOKER`.** A
+`SECURITY DEFINER` version would have to restate "owner, or outlet scope, or work context" — a
+second copy of the rules on this page, and CLAUDE.md §8 says a rule lives in one place. As
+`INVOKER` they select ids and let the parent table's own policy do the filtering, so **this page
+remains the single definition of who may read a row.**
+
+`manages_outlet()` still exists and still answers the same question; it simply carries a comment
+saying it must not be used inside a row predicate.
+
+Proof: the whole integration suite passed unchanged across both migrations, plus 22 assertions
+comparing each new form against the function it replaced — for OWNER, both managers, a manager
+with no outlets, two salespeople, ADMIN (who still gets nothing, ADR-017) and a deactivated user
+(who still gets nothing). See ADR-032.

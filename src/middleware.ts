@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 
+import { buildCsp } from '@/lib/security-headers'
 import { updateSession } from '@/lib/supabase/middleware'
 
 /**
@@ -39,6 +40,25 @@ const PUBLIC_PATHS = ['/login', '/auth']
  */
 const CRON_PREFIX = '/api/cron/'
 
+/**
+ * A fresh nonce per request (§23).
+ *
+ * 16 bytes of CSPRNG output. A nonce that repeats across responses is worth
+ * nothing — an injected script could simply carry the previous one — so this is
+ * never cached, memoised or derived from anything about the request.
+ */
+function newNonce(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return btoa(String.fromCharCode(...bytes))
+}
+
+/** The CSP is per-request, so it cannot live in `next.config.ts` with the rest. */
+function withCsp(response: NextResponse, csp: string): NextResponse {
+  response.headers.set('Content-Security-Policy', csp)
+  return response
+}
+
 export async function middleware(request: NextRequest) {
   // Before `updateSession`, deliberately: there is no session to refresh and no
   // cookie to rotate on a machine-to-machine request.
@@ -49,7 +69,21 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
-  const { response, userId } = await updateSession(request)
+  const nonce = newNonce()
+  const csp = buildCsp({
+    nonce,
+    supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
+    isProduction: process.env.NODE_ENV === 'production',
+  })
+
+  // Both headers go *inward*: `x-nonce` so a Server Component can read it with
+  // `headers()` if it ever renders a script tag of its own, and
+  // `Content-Security-Policy` because that is the one Next.js itself parses to
+  // find the nonce for its bootstrap scripts.
+  const { response, userId } = await updateSession(request, {
+    'x-nonce': nonce,
+    'Content-Security-Policy': csp,
+  })
   const { pathname } = request.nextUrl
 
   const isPublic = PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))
@@ -61,7 +95,7 @@ export async function middleware(request: NextRequest) {
   // a `.csv` file, and which makes "was I refused?" impossible to answer from
   // the status line. 401 says the one thing that is true.
   if (!userId && !isPublic && pathname.startsWith('/api/')) {
-    return NextResponse.json({ error: 'Sign in to continue.' }, { status: 401 })
+    return withCsp(NextResponse.json({ error: 'Sign in to continue.' }, { status: 401 }), csp)
   }
 
   if (!userId && !isPublic) {
@@ -70,17 +104,17 @@ export async function middleware(request: NextRequest) {
     // Carry the destination so a session that expired mid-task resumes where it
     // stopped rather than dumping the user on a landing page.
     redirect.searchParams.set('next', pathname)
-    return NextResponse.redirect(redirect)
+    return withCsp(NextResponse.redirect(redirect), csp)
   }
 
   if (userId && pathname === '/login') {
     const redirect = request.nextUrl.clone()
     redirect.pathname = '/'
     redirect.search = ''
-    return NextResponse.redirect(redirect)
+    return withCsp(NextResponse.redirect(redirect), csp)
   }
 
-  return response
+  return withCsp(response, csp)
 }
 
 export const config = {

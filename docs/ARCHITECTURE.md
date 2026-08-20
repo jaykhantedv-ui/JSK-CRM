@@ -440,3 +440,39 @@ One route handler, `/api/export/[dataset]`, which authenticates, validates, call
 read, reads through the caller's own session so RLS applies, and refuses an export larger than
 `EXPORT_ROW_LIMIT` rather than truncating it. Money leaves as rupees and every cell is neutralised
 against spreadsheet formula injection, both in `lib/csv.ts`.
+
+---
+
+## Response security headers (§23, ADR-031)
+
+Split across two places, because one of them cannot be static.
+
+`next.config.ts` declares everything that never varies — `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff`, HSTS, `Referrer-Policy`, `Permissions-Policy`,
+`X-DNS-Prefetch-Control` — and switches `poweredByHeader` off. Declaring them there rather than in
+the middleware also covers the responses the middleware matcher skips: `_next/static`, images and
+`favicon.ico`.
+
+`middleware.ts` builds the **Content-Security-Policy** per request from `lib/security-headers.ts`,
+with a fresh 16-byte nonce, and sets it on the *request* as well as the response — Next.js reads
+the nonce off the request header to stamp it onto its own bootstrap scripts. `updateSession()`
+takes those extra request headers and rebuilds them on each `NextResponse.next()`, because
+`request.cookies.set()` writes back into the `cookie` header and a `Headers` copy taken earlier
+would carry the pre-refresh session.
+
+    default-src 'self'
+    script-src  'self' 'nonce-…' 'strict-dynamic'      ← no unsafe-inline, no unsafe-eval
+    style-src   'self' 'unsafe-inline'                  ← React writes style attributes
+    connect-src 'self' <supabase origin>                ← PostgREST, Auth, signed Storage uploads
+    frame-ancestors 'none' · object-src 'none' · base-uri 'self' · form-action 'self'
+
+`style-src` keeps `'unsafe-inline'` because nonces do not apply to style *attributes* at all; the
+alternative is not a stricter policy, it is a broken page. Scripts, where the risk actually is,
+take no such exemption.
+
+**The trap this walked into, recorded because it is easy to walk into again:** `/login` was
+statically prerendered, and a prerendered page has no nonce to stamp. It shipped twelve unnonced
+script tags under a policy where `'strict-dynamic'` makes `'self'` ignored — so every script would
+have been blocked while every header check passed. It is now `dynamic = 'force-dynamic'`.
+`scripts/smoke.sh` asserts the nonce is both fresh per request *and* present on the page's scripts,
+so the mismatch cannot return silently.

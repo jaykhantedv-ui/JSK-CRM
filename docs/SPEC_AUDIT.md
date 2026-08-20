@@ -922,3 +922,74 @@ policy. `013_opportunity_events.sql` had never been applied to a shared environm
 is an edit rather than a follow-on migration (§21.2). `tests/integration/audit-trail.test.ts` now
 asserts the ordering directly — several events written in one transaction come back strictly
 ordered, and their timestamps are distinct.
+
+---
+
+## Master Phase 5 findings
+
+### P5-01 — outlet scope was evaluated once per row
+
+**Severity:** HIGH · **Type:** Performance defect · **Resolved by:** **ADR-032**, migrations 028/029
+
+Every scoped policy tested `manages_outlet(outlet_id)` — a `SECURITY DEFINER` function taking a row
+column, so it ran per row, each call re-reading `public.users` for the caller's role. Measured on
+20,005 opportunities as a salesperson: **792 ms with RLS against 4.8 ms without**. The accounts list
+was worse at **3,754 ms**, and `search_crm` reached **7.3 s**.
+
+This was not a hypothetical at scale: the cost is proportional to rows scanned and is paid on
+`/today`, on every list and on every search, from a phone, from the first thousand rows.
+
+**Resolution.** Thirteen policies rewritten to evaluate scope once per query, using the InitPlan
+pattern §15.1 already describes and migration 022 already uses. `/today` 881 → 75 ms, accounts
+3,754 → 103 ms, `opportunity_events` 3,277 → 14 ms, search 7,299 → 245 ms. **No rule changed** —
+the whole integration suite passed unchanged, and `rls-scope-equivalence.test.ts` adds 22
+assertions comparing each new form against the function it replaced, role by role.
+
+### P5-02 — a schema-filtered dump does not carry its extensions
+
+**Severity:** HIGH · **Type:** Data-recovery defect · **Resolved in** `scripts/restore.sh`
+
+Found by performing the restore §18 requires rather than by reading the script. The first drill
+reported a clean restore, every table present and **every row count matching** — and search was
+completely broken in the restored database.
+
+`pg_trgm` and `pgcrypto` live in Supabase's `extensions` schema. `pg_dump --schema=public …`
+carries the *uses* of an extension without the `CREATE EXTENSION` that defines it, so the three
+trigram indexes silently failed to restore and `search_crm` and `find_account_duplicates` raised
+`schema "extensions" does not exist` on every call.
+
+**Resolution.** `restore.sh` prepares the target's `extensions` schema before restoring — a no-op
+against a real Supabase project, and what makes the archive restorable onto a bare PostgreSQL
+server, which is the entire point of holding it. `verify-restore.sql` now **calls** `search_crm()`
+and asserts the three indexes exist, so this failure can never be silent again.
+
+**The general lesson, recorded because it generalises:** counting rows does not verify a restore.
+Exercising the functionality does.
+
+### P5-03 — a nonce-based CSP silently breaks a prerendered page
+
+**Severity:** HIGH · **Type:** Implementation trap · **Resolved by:** **ADR-031**
+
+`/login` was statically prerendered, and Next.js can only stamp a nonce onto scripts it renders per
+request. Under `script-src 'self' 'nonce-…' 'strict-dynamic'` — where `'strict-dynamic'` causes
+`'self'` to be **ignored** — the page shipped twelve unnonced script tags, so a browser would have
+blocked every script on the sign-in screen.
+
+Every header check passed. This is exactly the failure §23 warns about when it says not to break
+the application to satisfy a superficial header check, and it was caught only by loading the page
+in a real browser.
+
+**Resolution.** `/login` is `dynamic = 'force-dynamic'`. `scripts/smoke.sh` asserts the nonce is
+fresh per request *and* present on the page's own scripts.
+
+### P5-04 — two configuration gaps, reported rather than mutated
+
+**Severity:** LOW · **Type:** Business configuration · **Open — for the Project Owner**
+
+`scripts/data-quality.sql` found these on the development fixtures. Neither is a code defect and
+neither was silently "fixed" (§28):
+
+| Finding | What it means |
+|---|---|
+| `material_types` is `[]` | An empty list removes a field's options from every enquiry form, which looks like a bug to a salesperson. **The owner must supply the list before launch** (§33). |
+| One MANAGER has no outlet scope | Correct and deliberate — ADR-016 makes a manager with an empty scope see only their own records, which is safe by default for a newly created manager. Reported so it is a decision rather than an oversight. |

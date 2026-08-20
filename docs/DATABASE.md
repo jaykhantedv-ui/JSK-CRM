@@ -4,9 +4,15 @@ PostgreSQL 15+ on Supabase, region **Mumbai `ap-south-1`** (TODO-BD-08).
 Authoritative schema: `CLAUDE_CODE_BUILD_SPEC.md` §5, §6. This document is a working reference —
 **§5 wins any disagreement, except where an approved deviation is recorded below.**
 
-**Status: built and verified.** All seventeen migrations apply cleanly from an empty database,
-twice in a row, and are exercised by 154 integration tests against a real PostgreSQL 16 server
-(ADR-018). `src/types/database.types.ts` is generated from that verified database.
+**Status: built and verified.** All twenty-nine migrations apply cleanly from an empty database,
+twice in a row producing a byte-identical schema, and are exercised by 425 integration tests
+against a real PostgreSQL 16 server (ADR-018). `src/types/database.types.ts` is generated from that
+verified database and is byte-compared against it in CI.
+
+Migrations **028** and **029** change the *shape* of thirteen RLS policies without changing what
+any of them decides: outlet scope and readability are now evaluated once per query instead of once
+per row. The rule, the roles and the results are identical — see ADR-032 for the measurements and
+`tests/integration/rls-scope-equivalence.test.ts` for the proof.
 
 **Approved corrections and deviations applied to this schema:** 2026-08-19, Project Owner.
 Full reasoning in `/docs/SPEC_AUDIT.md`; ADRs in `/docs/DECISIONS.md` §B.

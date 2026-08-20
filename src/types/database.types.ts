@@ -1822,10 +1822,14 @@ export type Database = {
           projects: number
         }[]
       }
+      my_opportunity_account_ids: { Args: never; Returns: string[] }
+      my_opportunity_project_ids: { Args: never; Returns: string[] }
       normalize_phone: { Args: { raw: string }; Returns: string }
       owns_opportunity_on_account: { Args: { a: string }; Returns: boolean }
       owns_opportunity_on_project: { Args: { p: string }; Returns: boolean }
       raise_not_found: { Args: never; Returns: undefined }
+      readable_account_ids: { Args: never; Returns: string[] }
+      readable_opportunity_ids: { Args: never; Returns: string[] }
       reassign_opportunity: {
         Args: { p_opportunity_id: string; p_reason: string; p_to_user: string }
         Returns: {

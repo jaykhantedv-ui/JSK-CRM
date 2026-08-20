@@ -1494,6 +1494,115 @@ that were open after the first decision pass and how each closed:
 
 **The Decision Gate's blocking criteria are met.** See `/docs/IMPLEMENTATION_PLAN.md`.
 
+### ADR-031 — Security headers are split between `next.config.ts` and the middleware
+
+**Status:** Accepted
+**Date:** 2026-08-20   **Decided by:** Engineering (§23)
+
+**Context:** §23 requires CSP, HSTS, `X-Frame-Options: DENY` and
+`X-Content-Type-Options: nosniff` on every production response, and warns in the same breath
+against breaking the application to satisfy a header check. Those two requirements pull apart: a
+Content-Security-Policy worth having carries a per-request nonce, and a per-request value cannot be
+declared statically.
+
+**Decision:** The headers that never vary are declared in `next.config.ts`, so they also cover the
+responses the middleware matcher skips (`_next/static`, images, `favicon.ico`). The CSP is built
+per request in `middleware.ts` from `lib/security-headers.ts`, with a fresh 16-byte nonce, and is
+attached to the *request* as well as the response so Next.js stamps it onto its own bootstrap
+scripts.
+
+`script-src` is `'self' 'nonce-…' 'strict-dynamic'` — no `'unsafe-inline'`, no `'unsafe-eval'`.
+`style-src` keeps `'unsafe-inline'`, because React writes `style` attributes and nonces do not
+apply to style attributes at all; the alternative is not a stricter policy, it is a broken page.
+
+**Consequences:** `/login` had to become `dynamic = 'force-dynamic'`. Statically prerendered, it
+shipped twelve unnonced script tags under a policy where `'strict-dynamic'` causes `'self'` to be
+ignored — so a browser would have blocked every script on the sign-in page while every header check
+passed. This was found by loading the page in a real browser, not by reading the headers, and it is
+the concrete case §23's warning is about. The cost is one render of a static form per sign-in; the
+page could never really be cached anyway, because middleware runs `getUser()` on it.
+
+`scripts/smoke.sh` asserts the nonce is fresh per request *and* present on the page's scripts, so a
+future change that reintroduces the mismatch fails the deployment rather than the product.
+
+**Alternatives considered:** A static CSP with `'unsafe-inline'` — passes any header audit and
+stops nothing, since inline injection is the attack. CSP in report-only mode — reports into a
+collector the frozen stack does not contain. Forcing every route dynamic — pays the cost on 40
+routes to fix two.
+
+### ADR-032 — Outlet scope is evaluated once per query, not once per row
+
+**Status:** Accepted
+**Date:** 2026-08-20   **Decided by:** Engineering (§25)
+**Migrations:** `028_rls_scope_initplan.sql`, `029_rls_readable_sets.sql`
+
+**Context:** Every scoped policy tested `manages_outlet(outlet_id)`, and the readable-parent
+policies tested `owns_opportunity_on_account(id)`, `owns_opportunity_on_project(id)`,
+`can_read_opportunity(...)` and `can_read_account(...)`. All of these take a row column, so the
+planner must call them per row, and each is a `SECURITY DEFINER` function that re-reads
+`public.users` for the caller's role before doing its own lookup.
+
+Measured on a synthetic 20,005 opportunities / 8,004 accounts, as a salesperson:
+
+| Query | Per-row | Per-query |
+|---|---|---|
+| `opportunities` scan | 792 ms | 9.8 ms |
+| `accounts` scan | 3,754 ms | 103 ms |
+| `opportunity_events` scan | 3,277 ms | 14 ms |
+| `search_crm` (name) | 7,299 ms | 245 ms |
+| `find_account_duplicates` | 3,494 ms | 114 ms |
+| `/today` (`v_opportunity_flags`) | 881 ms | 75 ms |
+
+§15.1 already names this fix and applies it to the argument-free helpers — wrap as
+`(select public.fn())` so the planner lifts them into an InitPlan. Its note that "wrapping a
+correlated reference would defeat the point" is true of the wrapping but not of the predicate: the
+scope test does not need a function call per row, it needs set membership against a set built once.
+
+**Decision:**
+
+    manages_outlet(outlet_id)
+      →  (select public.is_owner()) or outlet_id in (select public.scoped_outlet_ids())
+
+    owns_opportunity_on_account(id)
+      →  id in (select public.my_opportunity_account_ids())
+
+    can_read_opportunity(opportunity_id)
+      →  opportunity_id in (select public.readable_opportunity_ids())
+
+    can_read_account(account_id)
+      →  account_id in (select public.readable_account_ids())
+
+`scoped_outlet_ids()` is not new — migration 022 already scopes the management RPCs with it.
+
+The owner test is a **separate disjunct** rather than folded into `scoped_outlet_ids()`, whose
+OWNER branch lists only `is_active` outlets. Collapsing the two would have quietly taken a closed
+outlet's history away from the owner. `tests/integration/rls-scope-equivalence.test.ts` pins that
+case specifically.
+
+`readable_opportunity_ids()` and `readable_account_ids()` are `SECURITY INVOKER`, deliberately.
+A `SECURITY DEFINER` version would have to restate "owner, or outlet scope, or work context" — a
+second copy of the authorization rule, which CLAUDE.md §8 forbids. As `INVOKER` they simply select
+ids and let the parent table's own policy filter them, so the policy remains the single definition
+of who may read a row.
+
+**Consequences:** No rule changed. The whole integration suite — `crm-permissions`,
+`rls-outlet-scope`, `management-scope`, `no-hard-delete` — passed unchanged across both migrations,
+and 22 further assertions were added that compare each new form against the function it replaced,
+role by role, including the deactivated user and ADMIN (ADR-017). `manages_outlet` is kept, with a
+comment saying it must not be used inside a row predicate.
+
+Three OWNER-only report RPCs remain at roughly 0.85–0.91 s at 20,005 opportunities
+(`management_team_workload`, `management_outlet_comparison`,
+`management_quotation_turnaround`). That is about five years of volume for this business, on an
+untuned container, and they are not on the salesperson hot path — recorded rather than optimised,
+because §25 also says not to build for a scale that is not coming.
+
+**Alternatives considered:** Leaving it, since 20 users will not hit 20,000 rows for years — but
+the cost is paid on `/today` from a phone from the first thousand rows, and the fix is one pattern
+the codebase already uses. Rewriting the helpers' bodies instead of the policies — they are still
+called per row, so it treats the symptom. Materialising scope into a table — a cache to invalidate,
+and a twelfth table.
+
 ---
 
 ## How to record a decision

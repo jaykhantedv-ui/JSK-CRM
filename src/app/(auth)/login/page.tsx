@@ -5,6 +5,22 @@ import { LoginForm } from './login-form'
 export const metadata: Metadata = { title: 'Sign in · JSK CRM' }
 
 /**
+ * Rendered per request so the CSP nonce is real (§23).
+ *
+ * Next.js stamps the middleware's nonce onto its bootstrap and RSC-payload
+ * scripts only while rendering; a prerendered page has no nonce to stamp. Left
+ * static, this page shipped twelve unnonced script tags under a `strict-dynamic`
+ * policy — which ignores `'self'` — so the browser would have blocked every one
+ * of them and the sign-in form would never have hydrated. The header check would
+ * still have passed, which is precisely the failure §23 warns about.
+ *
+ * The cost is one render of a static form per sign-in attempt. The page already
+ * could not be served from cache in practice: middleware runs `getUser()` on it
+ * to bounce a signed-in visitor to the dashboard.
+ */
+export const dynamic = 'force-dynamic'
+
+/**
  * The sign-in screen.
  *
  * **There is no "create an account" link and there never will be.** Users are

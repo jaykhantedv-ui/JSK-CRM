@@ -1,0 +1,138 @@
+# Migration + deployment pipeline (§21).
+#
+# The sequence in §21 is not a suggestion about ordering, it is the whole control:
+#
+#   tests → migrate staging → verify staging → deploy staging → smoke
+#         → migrate production → deploy production → smoke
+#
+# Production is downstream of a *verified* staging every time. Jobs depend on each
+# other so the order cannot be reversed by re-running one of them, and the
+# production jobs are gated on a GitHub Environment so a human approves the step
+# that touches customer data.
+#
+# Schema changes are applied ONLY from here. Never from a laptop, never through
+# the Supabase dashboard: a hand-applied change is invisible to the migration
+# ledger, and the next deployment will either fail or quietly disagree with it.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 1 · Full test suite
+    uses: ./.github/workflows/ci.yml
+
+  migrate-staging:
+    name: 2 · Migrate staging
+    needs: test
+    runs-on: ubuntu-24.04
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+
+      # `migration up --linked` applies only what the ledger says is pending, in
+      # filename order. It never re-runs an applied migration and never edits one.
+      - name: Apply pending migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          npx supabase link --project-ref "${{ vars.SUPABASE_STAGING_REF }}"
+          npx supabase migration up --linked
+
+      - name: Verify staging schema and list applied migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: npx supabase migration list --linked
+
+  deploy-staging:
+    name: 3 · Deploy staging + smoke test
+    needs: migrate-staging
+    runs-on: ubuntu-24.04
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Vercel (preview)
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          npx vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+          npx vercel build --token="$VERCEL_TOKEN"
+          URL=$(npx vercel deploy --prebuilt --token="$VERCEL_TOKEN")
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        run: scripts/smoke.sh "${{ steps.deploy.outputs.url }}"
+
+  migrate-production:
+    name: 4 · Migrate production
+    needs: deploy-staging
+    runs-on: ubuntu-24.04
+    # Requires a reviewer on the GitHub Environment. This is the approval gate.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+
+      # An out-of-band archive taken immediately before the schema changes, so a
+      # bad migration is recoverable to the minute rather than to last Sunday.
+      - name: Pre-migration backup
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          BACKUP_DEST: s3://${{ vars.AWS_BACKUP_BUCKET }}/database
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-16
+          scripts/backup.sh pre-migration
+
+      - name: Apply pending migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          npx supabase link --project-ref "${{ vars.SUPABASE_PRODUCTION_REF }}"
+          npx supabase migration up --linked
+          npx supabase migration list --linked
+
+  deploy-production:
+    name: 5 · Deploy production + smoke test
+    needs: migrate-production
+    runs-on: ubuntu-24.04
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Vercel (production)
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          npx vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx vercel build --prod --token="$VERCEL_TOKEN"
+          URL=$(npx vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Production smoke test
+        run: scripts/smoke.sh "${{ steps.deploy.outputs.url }}"
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

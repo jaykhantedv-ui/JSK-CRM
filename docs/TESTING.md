@@ -465,3 +465,50 @@ E2E_SUPABASE_READY=1 npm run test:e2e
 `LINK_EXISTING`, rollback, archive, restore, merge and every storage authorization rule are proved
 against a real PostgreSQL server in the four integration suites above — which is where §19.2 says
 the authorization model is actually verified. What E2E would add is the browser layer.
+
+---
+
+## Master Phase 5 — production readiness
+
+### Counts
+
+| Suite | Files | Tests | Change |
+|---|---|---|---|
+| Unit (Vitest) | 20 | **498** | +16 |
+| Integration / RLS (Vitest + PostgreSQL) | 15 | **425** | +22 |
+| E2E (Playwright) | 4 | 91 written, **auth-gated skips unchanged** | — |
+
+The E2E suites are unchanged and still skip themselves with a stated reason: hosted Supabase Auth
+is unreachable from this environment (`/docs/DEPLOYMENT.md` §0). They need no editing to run —
+set `E2E_SUPABASE_READY=1` with the credentials from `.env.example`.
+
+### New unit suite
+
+| File | Covers |
+|---|---|
+| `security-headers.test.ts` | Every §23 header and its value; that `script-src` carries the nonce and `'strict-dynamic'` and never `'unsafe-eval'` or `'unsafe-inline'`; that `frame-ancestors`, `object-src` and `frame-src` are `'none'`; that a missing or malformed Supabase URL narrows the policy rather than widening it to `*`; that `upgrade-insecure-requests` is production-only |
+
+### New integration suite
+
+| File | Covers |
+|---|---|
+| `rls-scope-equivalence.test.ts` | That migrations 028 and 029 changed *how often* the authorization rule is asked and not *what it decides* — the set form against the function it replaced, for OWNER, both managers, a manager with no outlets, two salespeople, ADMIN and a deactivated user; that an OWNER keeps a **deactivated** outlet's history, the one case where the two forms could have diverged; that `readable_*` return exactly what the parent table's RLS lets through; that an anonymous caller is refused at the table grant, before RLS is consulted |
+
+### Verification performed outside the suites
+
+These needed a running application rather than a test runner, so they are recorded here with what
+they proved.
+
+| Check | Method | Result |
+|---|---|---|
+| Migrations are deterministic | Two clean resets from empty, `pg_dump --schema-only`, byte comparison | **Byte-identical**, 29 migrations |
+| Generated types are current | `scripts/gen-types.mjs` against the live database, compared to the committed file | **Byte-identical** |
+| Security headers | `scripts/smoke.sh` against a real production build | **27/27 pass** |
+| CSP does not break the app | Real Chromium via Playwright, watching for violations and testing hydration | **0 violations**, form hydrates and accepts input |
+| API answers a status, not a page | `curl` against the running build | `401` JSON on every `/api/*`; `307` to `/login` on app routes |
+| Cron authentication | `curl`, all five routes, three secret states | `401` JSON missing and wrong; documented shape when correct |
+| Backup and restore | Real `pg_dump` → encrypt → restore into a separate database → verify | **PASS** — see `/docs/DEPLOYMENT.md` §7.4 |
+| Mobile | Chromium at 412×839, 320×658, 320×568 | No overflow, no touch target under 44 px, no data lost on blur |
+| Performance | 20,005 opportunities / 8,004 accounts, timed as each role | See ADR-032 |
+| Data quality | `scripts/data-quality.sql` | All structural checks zero; two configuration findings reported, not mutated |
+| Secrets | Full history scan, tracked files, built bundle | 0 matches across 9 commits; `check:bundle` clean |

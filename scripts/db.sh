@@ -18,12 +18,32 @@ PGBIN=${PGBIN:-/usr/lib/postgresql/16/bin}
 PGDATA=${PGDATA:-/var/lib/pgdata}
 PGPORT=${PGPORT:-54322}
 PGHOST=${PGHOST:-127.0.0.1}
+PGUSER=${PGUSER:-postgres}
 DB=${DB:-postgres}
-ADMIN_URL="postgresql://postgres@${PGHOST}:${PGPORT}/template1"
-DB_URL="postgresql://postgres@${PGHOST}:${PGPORT}/${DB}"
+
+# PG_EXTERNAL=1 means "a server is already listening and this script does not own
+# its lifecycle" — CI, where PostgreSQL is a service container. Everything after
+# `start` is identical, so CI exercises the same bootstrap, the same migration
+# ordering and the same seed as a developer's machine rather than a parallel path
+# that can drift away from it.
+PG_EXTERNAL=${PG_EXTERNAL:-0}
+
+CRED="$PGUSER"
+[ -n "${PGPASSWORD:-}" ] && CRED="${PGUSER}:${PGPASSWORD}"
+ADMIN_URL="postgresql://${CRED}@${PGHOST}:${PGPORT}/template1"
+DB_URL="postgresql://${CRED}@${PGHOST}:${PGPORT}/${DB}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 start() {
+  if [ "$PG_EXTERNAL" = "1" ]; then
+    echo "using the external postgres at ${PGHOST}:${PGPORT} (PG_EXTERNAL=1)"
+    for _ in $(seq 1 30); do
+      pg_isready -h "$PGHOST" -p "$PGPORT" -q && return
+      sleep 1
+    done
+    echo "no postgres answering on ${PGHOST}:${PGPORT}" >&2
+    exit 1
+  fi
   if "$PGBIN/pg_isready" -h "$PGHOST" -p "$PGPORT" -q; then
     echo "postgres already running on ${PGHOST}:${PGPORT}"
     return
@@ -39,7 +59,10 @@ start() {
   su postgres -c "$PGBIN/pg_ctl -D $PGDATA -l /var/log/pg/pg.log -o '-p $PGPORT -c listen_addresses=$PGHOST -c timezone=UTC' -w start"
 }
 
-stop() { su postgres -c "$PGBIN/pg_ctl -D $PGDATA -w stop" || true; }
+stop() {
+  [ "$PG_EXTERNAL" = "1" ] && { echo "external postgres — not stopping it"; return; }
+  su postgres -c "$PGBIN/pg_ctl -D $PGDATA -w stop" || true
+}
 
 reset() {
   start

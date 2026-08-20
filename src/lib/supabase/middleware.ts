@@ -13,12 +13,30 @@ import { supabaseAnonKey, supabaseUrl } from './env'
  *
  * `getUser()` is deliberate: it verifies the token with the auth server. Reading
  * the session from the cookie alone would trust a value the browser can edit.
+ *
+ * `extraRequestHeaders` carries the CSP nonce inward (§23). Next.js reads the
+ * nonce off the *request* `Content-Security-Policy` header and stamps it onto the
+ * bootstrap scripts it renders, so the value has to be attached to the request the
+ * downstream render sees — not merely to the response. It is rebuilt on every
+ * `NextResponse.next()` below rather than captured once, because
+ * `request.cookies.set()` writes back into the request's `cookie` header and a
+ * `Headers` copy taken earlier would carry the pre-refresh session.
  */
-export async function updateSession(request: NextRequest): Promise<{
+export async function updateSession(
+  request: NextRequest,
+  extraRequestHeaders?: Record<string, string>,
+): Promise<{
   response: NextResponse
   userId: string | null
 }> {
-  let response = NextResponse.next({ request })
+  const nextInit = () => {
+    if (!extraRequestHeaders) return { request }
+    const headers = new Headers(request.headers)
+    for (const [name, value] of Object.entries(extraRequestHeaders)) headers.set(name, value)
+    return { request: { headers } }
+  }
+
+  let response = NextResponse.next(nextInit())
 
   const supabase = createServerClient(supabaseUrl(), supabaseAnonKey(), {
     cookies: {
@@ -29,7 +47,7 @@ export async function updateSession(request: NextRequest): Promise<{
         for (const { name, value } of cookiesToSet) {
           request.cookies.set(name, value)
         }
-        response = NextResponse.next({ request })
+        response = NextResponse.next(nextInit())
         for (const { name, value, options } of cookiesToSet) {
           response.cookies.set(name, value, options)
         }

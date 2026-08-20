@@ -1479,3 +1479,40 @@ them continuously.
   20,000-opportunity infrastructure. The queries are aggregated in SQL, bounded and paginated, and
   the dashboard issues one round trip per block concurrently; that is a design argument rather than
   a measurement, and it is stated as one.
+
+---
+
+## Master Phase 5 — production readiness (2026-08-20)
+
+### Done
+
+| | |
+|---|---|
+| Repository | Fast-forwarded onto the complete Phase 1–4 history. The working branch held only the scaffolding commit; the Phase 4 work was on `claude/lucid-curie-m3mfxn`, a strict descendant, so this was a fast-forward — no history rewritten, nothing discarded |
+| Database | 29 migrations from empty **twice**, byte-identical schema; generated types byte-identical to the live database; exactly **one** DELETE policy, on `project_stakeholders` |
+| Security headers | `lib/security-headers.ts`, nonce-based CSP in middleware, static headers in `next.config.ts` (ADR-031) |
+| Performance | Thirteen RLS policies moved from per-row to per-query evaluation (ADR-032, migrations 028/029) |
+| Backup | `scripts/backup.sh`, `scripts/restore.sh`, `scripts/verify-restore.sql`, `.github/workflows/backup.yml` — **restore drilled and passed** |
+| CI/CD | `ci.yml`, `deploy.yml`, `backup.yml`, `scripts/smoke.sh` |
+| Data quality | `scripts/data-quality.sql` — read-only, reports, never mutates |
+| Docs | README · ARCHITECTURE · DATABASE · PERMISSIONS · TESTING · DEPLOYMENT · DECISIONS · SPEC_AUDIT · new RUNBOOK |
+
+### Not done, and why
+
+Everything requiring a hosted account. The environment's egress policy answers **403 to CONNECT**
+for `api.supabase.com`, `supabase.co`, `api.vercel.com` and `api.resend.com`, and no token for any
+of them is attached. No restriction was bypassed.
+
+| Blocked | Needs |
+|---|---|
+| Supabase staging + production in `ap-south-1` | A Supabase account and `SUPABASE_ACCESS_TOKEN` |
+| Hosted Auth, PostgREST and Storage verification | The above, then the §0 checklist in DEPLOYMENT.md |
+| Real-Auth E2E (91 tests, written, self-skipping) | The above, then `E2E_SUPABASE_READY=1` |
+| Vercel project, env vars, cron | A Vercel account and `VERCEL_TOKEN`; hourly cron needs a paid plan |
+| Resend sender and real digests | A Resend account, `RESEND_API_KEY` and `RESEND_FROM_EMAIL` |
+| S3 bucket, IAM, lifecycle retention | A business-owned AWS account in `ap-south-1` |
+| 20 production users, 2 outlets, geography | The Supabase project, then §32–§33 |
+| Business UAT and production import | All of the above |
+
+**This is the last development phase.** What remains is provisioning and the business's own
+acceptance run, both of which need a human with accounts.

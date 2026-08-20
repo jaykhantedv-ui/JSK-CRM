@@ -1,0 +1,163 @@
+# Continuous integration (§19).
+#
+# Two jobs, split by what they need rather than by what they are: `verify` needs
+# only Node, `database` needs a PostgreSQL server. Splitting them this way means a
+# TypeScript error is reported in well under a minute instead of behind a database
+# boot.
+#
+# The database job runs the migrations from empty TWICE and compares the two
+# schemas byte for byte (§5). A migration that is not deterministic — one that
+# depends on the day, on a row that happens to exist, or on the order two
+# statements happened to run in — passes a single reset and fails this.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  verify:
+    name: typecheck · lint · unit · build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+        env:
+          # Placeholders: the build must not need real credentials, and a build
+          # that reaches a real project from CI is a build that can write to it.
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+          NEXT_PUBLIC_APP_URL: https://placeholder.invalid
+
+      # §19.4. The service-role key bypasses RLS completely; one stray import into
+      # a Client Component ships it to every browser. Grepping the build output is
+      # the only check that survives a refactor.
+      - name: Service-role key absent from the client bundle
+        run: npm run check:bundle
+
+  database:
+    name: migrations · constraints · RLS
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          # UTC, like Supabase. Every date expression in the schema has to be
+          # explicit about Asia/Kolkata rather than inheriting it (B-10).
+          TZ: UTC
+        ports: ['54322:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PG_EXTERNAL: '1'
+      PGHOST: 127.0.0.1
+      PGPORT: '54322'
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: PostgreSQL 16 client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+
+      - name: Reset from empty and migrate (pass 1)
+        run: scripts/db.sh reset
+
+      - name: Capture schema (pass 1)
+        run: |
+          pg_dump "$DATABASE_URL" --schema-only --schema=public --schema=storage \
+            --no-owner --no-privileges \
+            | grep -v '^\\\(un\)\?restrict ' > /tmp/schema1.sql
+
+      - name: Integration and RLS tests
+        run: npm run test:integration
+
+      - name: Reset from empty and migrate (pass 2)
+        run: scripts/db.sh reset
+
+      - name: Capture schema (pass 2)
+        run: |
+          pg_dump "$DATABASE_URL" --schema-only --schema=public --schema=storage \
+            --no-owner --no-privileges \
+            | grep -v '^\\\(un\)\?restrict ' > /tmp/schema2.sql
+
+      # A migration that is not deterministic passes one reset and fails here.
+      - name: No schema drift between the two resets
+        run: |
+          if ! diff -u /tmp/schema1.sql /tmp/schema2.sql; then
+            echo "::error::Migrations are not deterministic — two clean resets produced different schemas."
+            exit 1
+          fi
+          echo "Two clean resets produced byte-identical schemas."
+
+      # A stale database.types.ts is a compile-time lie: the code typechecks
+      # against columns the database no longer has.
+      - name: Generated types match the database
+        run: |
+          node scripts/gen-types.mjs "$DATABASE_URL" /tmp/database.types.ts
+          if ! diff -u src/types/database.types.ts /tmp/database.types.ts; then
+            echo "::error::src/types/database.types.ts is stale. Run: npm run db:types:nodocker"
+            exit 1
+          fi
+          echo "Generated types are current."
+
+      # §18. The backup is only as good as the restore, so CI performs one on
+      # every run rather than trusting that last quarter's drill still holds.
+      - name: Backup and restore drill
+        env:
+          BACKUP_PASSPHRASE: ci-drill-passphrase-not-a-production-key
+          BACKUP_DEST: file:///tmp/ci-backups
+        run: |
+          scripts/backup.sh ci-drill
+          psql "postgresql://postgres:postgres@127.0.0.1:54322/template1" \
+            -q -c 'drop database if exists jsk_restore_drill;' \
+            -c 'create database jsk_restore_drill;'
+          RESTORE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/jsk_restore_drill \
+            scripts/restore.sh "$(ls /tmp/ci-backups/*.dump.enc | tail -1)"
+        # BACKUP_DEST is a directory on the runner: this drill proves the scripts
+        # work, and must never write into the business's real backup bucket.
