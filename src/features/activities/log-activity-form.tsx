@@ -6,6 +6,7 @@ import {
 import { useRouter } from 'next/navigation'
 import { useActionState, useEffect, useState } from 'react'
 
+import { FileUpload, type UploadRequest, type UploadTicket } from '@/components/shared/file-upload'
 import { Button } from '@/components/ui/button'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { IDLE_FORM_STATE, type FormState } from '@/lib/form-state'
@@ -31,9 +32,14 @@ import type { ActivityType } from '@/types/domain'
  * explicit that the application must not hard-block here: blocking produces
  * fabricated dates, which is worse than a visible gap.
  *
- * For a site visit, measurements and a location note appear. There is no photo
- * upload in this phase — file storage is a later master phase, and a control that
- * did nothing would be worse than none.
+ * For a site visit, measurements and a location note appear — and, once the
+ * visit is saved, a photo upload.
+ *
+ * **The photo step is deliberately after the save, not part of it** (§11.5).
+ * An upload failure must not block the activity: the visit is committed the
+ * moment "Log it" succeeds, and the photographs are a second step that can be
+ * retried or abandoned without costing the salesperson the measurements they
+ * took standing on a building site.
  */
 const TYPE_ICONS: Record<ActivityType, typeof Phone> = {
   CALL: Phone,
@@ -62,6 +68,8 @@ export function LogActivityForm({
   defaultType = 'CALL',
   showNextAction = true,
   onDone,
+  requestPhotoUpload,
+  attachPhoto,
 }: {
   action: (previous: FormState, formData: FormData) => Promise<FormState>
   opportunities: { id: string; title: string; stage: string }[]
@@ -69,6 +77,9 @@ export function LogActivityForm({
   defaultType?: ActivityType
   showNextAction?: boolean
   onDone?: () => void
+  /** Both or neither. Without them a site visit simply has no photo step. */
+  requestPhotoUpload?: (input: UploadRequest) => Promise<UploadTicket>
+  attachPhoto?: (input: { entityId: string; path: string }) => Promise<string[]>
 }) {
   const [state, formAction, pending] = useActionState(action, IDLE_FORM_STATE)
   const [type, setType] = useState<ActivityType>(defaultType)
@@ -84,12 +95,40 @@ export function LogActivityForm({
 
   const dates = quickDates()
 
+  // The saved activity is waiting for its photographs. The panel stays open;
+  // everything else about the activity is already committed.
+  const photoStage = Boolean(
+    state.ok && state.createdId && type === 'SITE_VISIT' && requestPhotoUpload && attachPhoto,
+  )
+
   useEffect(() => {
-    if (state.ok) {
-      onDone?.()
-      router.refresh()
-    }
-  }, [state.ok, onDone, router])
+    if (!state.ok) return
+    router.refresh()
+    // Closing here would take the retry with it, so a site visit with photos to
+    // add closes itself when the user says it is finished.
+    if (!photoStage) onDone?.()
+  }, [state.ok, photoStage, onDone, router])
+
+  if (photoStage && state.createdId && requestPhotoUpload && attachPhoto) {
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+          Site visit saved. Add photographs if you have them — the visit is already recorded
+          either way.
+        </p>
+        <FileUpload
+          entityId={state.createdId}
+          requestUpload={requestPhotoUpload}
+          attach={attachPhoto}
+          label="Add photos"
+          accept="image/jpeg,image/png,image/webp"
+        />
+        <Button type="button" variant="secondary" onClick={() => onDone?.()}>
+          Done
+        </Button>
+      </div>
+    )
+  }
 
   return (
     <form action={formAction} className="flex flex-col gap-4" noValidate>

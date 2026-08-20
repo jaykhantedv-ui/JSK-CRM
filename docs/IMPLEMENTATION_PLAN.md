@@ -1202,6 +1202,42 @@ reaching its counter update leaves the state stale — the update belongs in a `
 
 ---
 
+## As built — Master Phase 4 (Phases 15–18), implemented 2026-08-20
+
+**What shipped.** Import, archive/restore, merge, private file storage, five cron routes and the
+Resend notification implementation, plus the operational settings screen. Five new migrations
+(023–027), five new services, and 190 new tests.
+
+| Phase | Delivered |
+|---|---|
+| **15 — Import** | Upload → validate → preview → duplicate analysis → per-row decision → atomic import → result → 7-day rollback. Accounts and contacts only (TODO-BD-10). OWNER/ADMIN; 5 MB / 5,000 rows. ADR-012's atomicity kept and live progress dropped. |
+| **16 — Archive and merge** | C-3's four steps as one operation: `archive_account` stamps the account and its opportunities, projects and contacts with **one shared instant**, which is what lets `restore_account` reverse exactly that operation and nothing else. Manual merge, MANAGER/OWNER, with ADR-008's irreversibility stated plainly and a typed confirmation. `/archive` screen. |
+| **17 — Storage** | Private `crm-files` bucket; **the path prefix is the authorization key**, enforced by policies on `storage.objects`. Signed upload URL issued only after a server-side visibility check (ADR-005); 60-second read URLs; hand-rolled magic-byte check (M-14). Site-visit photos and quotation PDFs. |
+| **18 — Cron and email** | Five routes with `CRON_SECRET`, the `/api/cron/*` middleware exemption, ADR-011's hourly-trigger-plus-in-route-gate for the owner summary, ADR-014's failure state, and `run_maintenance` with the H-09 rollback-window exclusion. |
+
+**Decisions taken during implementation.** ADR-025 … ADR-030 in `/docs/DECISIONS.md`.
+
+**Defects found and fixed.**
+
+| Defect | Fix |
+|---|---|
+| `contacts` had none of `is_imported`, `legacy_ref`, `import_batch_id`, so §20.6 rollback could not find an imported contact | Migration `026`, per H-03 |
+| `v_opportunity_flags` is defined `select o.*`, and PostgreSQL expands that star at creation — a column added later never appears in the view, silently | The view is recreated in the same migration that adds `quotation_file_paths` (`024`) |
+| `src/features/management` was missing from the §18 ESLint feature-boundary list since Phase 3 | Added, with `archive` and `settings` |
+| `_previous` was an error in some files and silent in others (the rule reports an unused argument only when it is last) | One `argsIgnorePattern` rule, applied consistently |
+
+**Verified at completion.** 482 unit · 403 integration/RLS · 59 E2E passing with 32 explicitly
+skipped · typecheck, lint and production build clean · service-role bundle grep clean · database
+reset from empty twice · generated types byte-identical on regeneration.
+
+**Still unverified — the same environment limitation as Phase 2.** Hosted Supabase Auth,
+PostgREST and Storage. The egress policy blocks the container images and `api.supabase.com`
+(ADR-018). Master Phase 5 owns that verification. Nothing here claims otherwise: the 32 skipped
+E2E specs name the reason in their skip message, and every rule they cover is proved against a
+real PostgreSQL server in the integration suite.
+
+---
+
 # Phase 19 — Complete testing
 
 **Spec phase:** 8 Security & QA · **Spec sections:** §19 (all), §23.8

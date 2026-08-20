@@ -55,16 +55,35 @@ const SETTINGS_SCHEMAS = {
 export type SettingKey = keyof typeof SETTINGS_SCHEMAS
 export type SettingValue<K extends SettingKey> = z.infer<(typeof SETTINGS_SCHEMAS)[K]>
 
-/** Every setting, read once per request. */
-export const getAllSettings = cache(async (): Promise<Record<string, unknown>> => {
-  const supabase = await createSupabaseServerClient()
-  const { data, error } = await supabase.from('system_settings').select('key, value')
+/**
+ * The minimum a settings reader needs. Declared structurally rather than as the
+ * generated `SupabaseClient` type so that BOTH the user-session client and the
+ * service-role client satisfy it without this module importing the admin client —
+ * which the §15.7 lint boundary rightly forbids it from doing.
+ */
+export type SettingsReader = {
+  from: (table: 'system_settings') => {
+    select: (columns: string) => PromiseLike<{
+      data: { key: string; value: unknown }[] | null
+      error: unknown | null
+    }>
+  }
+}
+
+async function readSettings(client: SettingsReader): Promise<Record<string, unknown>> {
+  const { data, error } = await client.from('system_settings').select('key, value')
 
   if (error) {
     throw new AppError('INTERNAL', 'Could not read system settings.', { details: error })
   }
 
   return Object.fromEntries((data ?? []).map((row) => [row.key, row.value]))
+}
+
+/** Every setting, read once per request. */
+export const getAllSettings = cache(async (): Promise<Record<string, unknown>> => {
+  const supabase = await createSupabaseServerClient()
+  return readSettings(supabase as unknown as SettingsReader)
 })
 
 /**
@@ -128,4 +147,97 @@ export async function updateSetting<K extends SettingKey>(
     const { fromPostgrestError } = await import('@/lib/errors')
     throw fromPostgrestError(error)
   }
+}
+
+/**
+ * Read one setting through a caller-supplied client.
+ *
+ * The cron routes have no user session — a scheduler sends a bearer token, not a
+ * cookie — so `getSetting`'s server client reads as `anon` and
+ * `system_settings_select` correctly returns nothing. They pass the service-role
+ * client instead.
+ *
+ * **This does not make a second reader of `system_settings`.** It is the same
+ * module, the same schemas and the same validation; only the connection differs.
+ * A cron route reading `system_settings` directly would be the violation
+ * CLAUDE.md §3 is about.
+ */
+export async function getSettingWith<K extends SettingKey>(
+  client: SettingsReader,
+  key: K,
+): Promise<SettingValue<K>> {
+  const all = await readSettings(client)
+
+  if (!(key in all)) {
+    throw new AppError('INTERNAL', `System setting "${key}" is missing. Run the migrations.`)
+  }
+
+  const parsed = SETTINGS_SCHEMAS[key].safeParse(all[key])
+  if (!parsed.success) {
+    throw new AppError('INTERNAL', `System setting "${key}" holds an invalid value.`, {
+      details: parsed.error.issues,
+    })
+  }
+
+  return parsed.data as SettingValue<K>
+}
+
+/** A writer for the same reason: ADR-014's maintenance counters are cron-written. */
+export type SettingsWriter = {
+  from: (table: 'system_settings') => {
+    update: (values: { value: unknown }) => {
+      eq: (column: 'key', value: string) => PromiseLike<{ error: unknown | null }>
+    }
+  }
+}
+
+/**
+ * Write one setting through a caller-supplied client.
+ *
+ * Used only by the maintenance cron for `maintenance_consecutive_failures` and
+ * `maintenance_last_failure_at` (ADR-014). Those two keys are OPERATIONAL STATE,
+ * not configuration: they are written by the job and must never appear at
+ * `/settings` as something a person can tune.
+ */
+export async function setSettingWith<K extends SettingKey>(
+  client: SettingsWriter,
+  key: K,
+  value: SettingValue<K>,
+): Promise<void> {
+  const parsed = SETTINGS_SCHEMAS[key].safeParse(value)
+  if (!parsed.success) {
+    throw new AppError('INTERNAL', `That is not a valid value for "${key}".`, {
+      details: parsed.error.issues,
+    })
+  }
+
+  const { error } = await client.from('system_settings').update({ value: parsed.data }).eq('key', key)
+  if (error) {
+    throw new AppError('INTERNAL', `Could not write system setting "${key}".`, { details: error })
+  }
+}
+
+/**
+ * The keys a person may edit at `/settings`.
+ *
+ * ADR-014's two maintenance counters are deliberately absent, and so is anything
+ * else the system writes about itself. `dormancy_days` is retired (ADR-010) and
+ * must never reappear.
+ */
+export const EDITABLE_SETTING_KEYS = [
+  'cities',
+  'material_types',
+  'stage_probabilities',
+  'high_value_threshold_paise',
+  'account_dormancy_days',
+  'opportunity_dormancy_days',
+  'stage_stall_days',
+  'new_enquiry_sla_hours',
+  'owner_summary_schedule',
+] as const satisfies readonly SettingKey[]
+
+export type EditableSettingKey = (typeof EDITABLE_SETTING_KEYS)[number]
+
+export function isEditableSettingKey(key: string): key is EditableSettingKey {
+  return (EDITABLE_SETTING_KEYS as readonly string[]).includes(key)
 }

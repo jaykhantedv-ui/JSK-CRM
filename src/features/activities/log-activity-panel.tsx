@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 
+import type { UploadRequest, UploadTicket } from '@/components/shared/file-upload'
 import { Button } from '@/components/ui/button'
 import { LogActivityForm } from './log-activity-form'
 import type { FormState } from '@/lib/form-state'
@@ -23,12 +24,16 @@ export function LogActivityPanel({
   defaultOpportunityId,
   defaultType,
   label = 'Log activity',
+  requestPhotoUpload,
+  attachPhoto,
 }: {
   action: (previous: FormState, formData: FormData) => Promise<FormState>
   opportunities: { id: string; title: string; stage: string }[]
   defaultOpportunityId?: string | null
   defaultType?: ActivityType
   label?: string
+  requestPhotoUpload?: (input: UploadRequest) => Promise<UploadTicket>
+  attachPhoto?: (input: { entityId: string; path: string }) => Promise<string[]>
 }) {
   const [open, setOpen] = useState(false)
 
@@ -54,6 +59,8 @@ export function LogActivityPanel({
         defaultOpportunityId={defaultOpportunityId}
         defaultType={defaultType}
         onDone={() => setOpen(false)}
+        requestPhotoUpload={requestPhotoUpload}
+        attachPhoto={attachPhoto}
       />
     </div>
   )

@@ -7,6 +7,7 @@ import {
   optionalField, requireField, stateFromError, valuesFrom, type FormState,
 } from '@/lib/form-state'
 import { logActivity, updateActivity } from '@/services/activity.service'
+import { attachActivityPhoto, createSignedUpload } from '@/services/storage.service'
 
 /**
  * Activity Server Actions (§11.5).
@@ -21,6 +22,7 @@ export async function logActivityAction(
   formData: FormData,
 ): Promise<FormState> {
   const values = valuesFrom(formData)
+  let activityId: string
 
   try {
     // "Can't say yet" (§8.3). A legitimate answer — it clears the next action and
@@ -29,7 +31,7 @@ export async function logActivityAction(
     const nextActionDate = optionalField(formData, 'nextActionDate')
     const nextAction = optionalField(formData, 'nextAction')
 
-    await logActivity({
+    const activity = await logActivity({
       accountId: context.accountId,
       opportunityId: optionalField(formData, 'opportunityId') ?? context.opportunityId ?? undefined,
       projectId: context.projectId ?? undefined,
@@ -51,13 +53,16 @@ export async function logActivityAction(
       nextActionNote: optionalField(formData, 'nextActionNote'),
       clearNextAction,
     })
+    activityId = activity.activity.id
   } catch (error) {
     return stateFromError(error, values)
   }
 
   revalidatePath(context.redirectTo)
   revalidatePath('/today')
-  return { ok: true, error: null, fieldErrors: {} }
+  // The id travels back so a site visit can offer its photo upload without
+  // leaving the screen — the activity is already committed at this point (§11.5).
+  return { ok: true, error: null, fieldErrors: {}, createdId: activityId }
 }
 
 /**
@@ -88,4 +93,37 @@ export async function updateActivityAction(
 
   revalidatePath(redirectTo)
   return { ok: true, error: null, fieldErrors: {} }
+}
+
+/**
+ * §11.5 — site-visit photographs, attached AFTER the activity is committed.
+ *
+ * **An upload failure must never block the activity.** That is why these are
+ * separate actions called from a control that only appears once the activity
+ * exists: the visit is recorded the moment the salesperson presses save, and the
+ * photographs are a second, retryable step. A combined submit could not offer
+ * that guarantee — a failed byte transfer would take the measurements with it.
+ */
+export async function requestActivityPhotoUploadAction(input: {
+  entityId: string
+  fileName: string
+  size: number
+  mimeType: string
+  head: string
+}) {
+  const { path, token } = await createSignedUpload({
+    entityType: 'activity',
+    entityId: input.entityId,
+    fileName: input.fileName,
+    size: input.size,
+    mimeType: input.mimeType,
+    head: input.head,
+  })
+  return { path, token }
+}
+
+export async function attachActivityPhotoAction(input: { entityId: string; path: string }) {
+  const paths = await attachActivityPhoto(input)
+  revalidatePath('/today')
+  return paths
 }

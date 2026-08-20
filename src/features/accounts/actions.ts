@@ -6,8 +6,9 @@ import { redirect } from 'next/navigation'
 import {
   moneyField, optionalField, requireField, stateFromError, valuesFrom, type FormState,
 } from '@/lib/form-state'
+import { AppError } from '@/lib/errors'
 import {
-  checkDuplicates, createAccount, createAccountWithOpportunity, updateAccount,
+  checkDuplicates, createAccount, createAccountWithOpportunity, mergeAccounts, updateAccount,
 } from '@/services/account.service'
 import type { DuplicateMatch } from '@/lib/duplicates'
 
@@ -147,4 +148,39 @@ export async function checkDuplicatesAction(input: {
     // A failed advisory check must never break the form the user is filling in.
     return []
   }
+}
+
+/**
+ * §8.9 — manual account merge, MANAGER/OWNER only.
+ *
+ * **ADR-008: this is not reversible in V1.** The action does not pretend
+ * otherwise and neither does the form it serves. `mergeAccounts` in
+ * `account.service.ts` is where the rule lives; the RPC behind it checks the role
+ * and the visibility of both records itself.
+ */
+export async function mergeAccountsAction(
+  input: { sourceId: string; targetId: string },
+  _previous: FormState,
+  formData: FormData,
+): Promise<FormState> {
+  try {
+    // A typed confirmation, not a checkbox. The merge cannot be undone, and a
+    // checkbox is something people click past.
+    if (String(formData.get('confirm') ?? '').trim().toUpperCase() !== 'MERGE') {
+      throw new AppError('VALIDATION_FAILED', 'Type MERGE to confirm.', { field: 'confirm' })
+    }
+
+    await mergeAccounts({
+      sourceId: input.sourceId,
+      targetId: input.targetId,
+      reason: String(formData.get('reason') ?? '').trim() || undefined,
+    })
+  } catch (error) {
+    return stateFromError(error, valuesFrom(formData))
+  }
+
+  revalidatePath('/accounts')
+  revalidatePath('/dashboard')
+  revalidatePath(`/accounts/${input.targetId}`)
+  redirect(`/accounts/${input.targetId}?merged=1`)
 }

@@ -447,3 +447,31 @@ planner decision.**
 made **as the restricted role** (§23 — verifying a permission as OWNER proves nothing). Still
 unproved, and honestly so (ADR-018): Supabase Auth, Storage policies and PostgREST request handling,
 which need a real Supabase project.
+
+
+---
+
+## Master Phase 4 — operations
+
+| Action | SALESPERSON | MANAGER | OWNER | ADMIN | Enforced by |
+|---|---|---|---|---|---|
+| Import (upload, review, run) | ✗ | ✗ | ✓ | ✓ | RLS on `import_batches` / `import_rows`; `requireImporter()` |
+| Roll back an import | ✗ | ✗ | ✓ | ✗ | `rollbackImport` (§20.6) |
+| Archive / restore | ✗ | ✓ own outlets | ✓ | ✗ | `guard_record_scope()` trigger |
+| Merge customers | ✗ | ✓ own outlets | ✓ | ✗ | `merge_accounts` role + visibility checks (ADR-026) |
+| Read a stored file | own / work context | own outlets | ✓ | **✗** | `crm_files_select` on `storage.objects` |
+| Upload a file | into what they can see | into their outlets | ✓ | **✗** | `crm_files_insert` |
+| Edit settings | ✗ | ✗ | ✓ | ✓ | `system_settings_update` |
+| Trigger a cron route | — | — | — | — | `CRON_SECRET` only; no user role reaches them |
+
+**ADMIN is absent from every business-data row above, including files.** ADR-017: ADMIN
+administers users, outlets, settings and imports and carries no automatic sales visibility. The
+storage suite asserts an ADMIN sees **zero** objects.
+
+**No role may delete anything**, including a storage object. The single approved DELETE policy in
+the schema is still `project_stakeholders` (ADR-004).
+
+**The maintenance counters are not settings.** `maintenance_consecutive_failures` and
+`maintenance_last_failure_at` are written only by the maintenance cron (ADR-014) and are excluded
+from `EDITABLE_SETTING_KEYS`. `/settings` displays them and offers no reset — an administrator
+must not be able to silence a failing job instead of fixing it.

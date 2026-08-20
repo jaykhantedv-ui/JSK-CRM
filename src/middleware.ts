@@ -17,7 +17,38 @@ import { updateSession } from '@/lib/supabase/middleware'
  */
 const PUBLIC_PATHS = ['/login', '/auth']
 
+/**
+ * Cron routes authenticate by shared secret, not by session (§14.7).
+ *
+ * Vercel Cron calls `/api/cron/*` with a bearer token and no cookie jar. Running
+ * the session middleware over that request achieves nothing useful and one
+ * actively harmful thing: with no session it would answer the scheduler a 401
+ * written for a browser — or, if the API branch below were ever reordered, a
+ * redirect to `/login`, which returns **200 and a page of HTML**. A scheduler
+ * reading the status line would record that as a successful run forever.
+ *
+ * So cron is exempt from this middleware entirely, and **each route validates
+ * `CRON_SECRET` itself** through `requireCronAuth` in `lib/cron.ts`. The
+ * exemption removes a session check that was never the control here; it does not
+ * remove the control. A cron route with no `requireCronAuth` call is unprotected,
+ * which is why every one of them is tested for the missing-secret and
+ * wrong-secret cases (§20).
+ *
+ * This is the narrowest possible carve-out: one prefix, matched exactly, before
+ * any other branch. Normal application and API routes are untouched.
+ */
+const CRON_PREFIX = '/api/cron/'
+
 export async function middleware(request: NextRequest) {
+  // Before `updateSession`, deliberately: there is no session to refresh and no
+  // cookie to rotate on a machine-to-machine request.
+  if (
+    request.nextUrl.pathname === '/api/cron' ||
+    request.nextUrl.pathname.startsWith(CRON_PREFIX)
+  ) {
+    return NextResponse.next()
+  }
+
   const { response, userId } = await updateSession(request)
   const { pathname } = request.nextUrl
 

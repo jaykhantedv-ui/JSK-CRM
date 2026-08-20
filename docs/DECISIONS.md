@@ -1308,6 +1308,158 @@ does not build cron (§22) — and the behaviour is unchanged from Phase 2, whic
 Recorded here so it is not discovered as a mystery.
 
 
+## Master Phase 4 — operations, data and automation
+
+### ADR-025 — Import notification suppression is a durable column, not a transaction-local flag
+
+**Status:** accepted, 2026-08-20 · **Supersedes the mechanism in §20.5, not its intent**
+
+§20.5 says a **transaction-local flag** suppresses SLA notification eligibility during an import.
+A transaction-local flag cannot do that job. The SLA reminder is a cron route that runs hourly,
+long after the import transaction has committed and its GUC has gone; Phase 15's own risk note
+says the suppression "must survive the cron path, not just the request path", which is precisely
+what a GUC cannot do.
+
+**Decision.** The mechanism is the **`is_imported` column that §20.5 already requires on every
+created row**, and the cron queries exclude it. `026_contacts_import_columns.sql` adds the column
+to `contacts`, which was missing all three provenance columns (see below).
+
+This is also the truthful rule rather than a workaround. A customer copied out of a 2019 paper
+register is **not** a new enquiry that somebody failed to answer within forty-eight hours, and it
+never becomes one — not an hour after the import, and not a year after it. The intent of §20.5 is
+fully served; only the mechanism differs, and the durable one is strictly stronger.
+
+**Defect fixed alongside.** `contacts` carried none of `is_imported`, `legacy_ref` or
+`import_batch_id`, although §20.2 lists `legacy_ref` in the contacts template and §20.5 requires
+all three on every imported row. Without them an imported contact was indistinguishable from a
+typed one, so §20.6's rollback could not find it and the seven-day undo silently covered only
+half of what was imported. Added in a **new numbered migration**, per H-03 and §21.2.
+
+**Tested.** `tests/integration/automation-state.test.ts` — an imported opportunity is never
+SLA-eligible; `import-execution.test.ts` — every created row carries all three columns, and
+rollback finds contacts as well as accounts.
+
+---
+
+### ADR-026 — `merge_accounts` is `SECURITY DEFINER`, with its authorization written into the function
+
+**Status:** accepted, 2026-08-20 · **Narrow exception to CLAUDE.md §8's SECURITY INVOKER rule**
+
+CLAUDE.md §8 requires multi-table write RPCs to be `SECURITY INVOKER` so RLS still applies.
+`merge_accounts` cannot be, and the reason is specific rather than convenient.
+
+`activities` is append-only with a **24-hour, author-only** edit window (§5.8). A manager has no
+UPDATE path to it at all, by design. But an activity is keyed to `account_id`, and a merge that
+left the activities behind would strand the customer's entire history on a record that is about
+to be archived — the Customer 360 timeline the whole system exists to produce (§1.2) would come
+up empty for the surviving customer.
+
+**Decision.** `merge_accounts` is `SECURITY DEFINER`, in the same sense as `log_opportunity_event()`
+and the ADR-020 triggers: it performs a system consequence of an action the caller was already
+authorized to take. The authorization the DEFINER context skips is written into the function and
+runs first:
+
+- `is_manager_or_above()` — a salesperson and an ADMIN are both refused;
+- `can_read_account()` on **both** records — otherwise a manager could merge a record from an
+  outlet they do not manage into one they do, which is a way to read another outlet's data;
+- neither record may be archived.
+
+It is not a way to edit an activity. `performed_by`, `summary`, `occurred_at` and every other
+column are untouched — history is not rewritten (§8.1). Only the customer the activity hangs off
+moves.
+
+**Tested.** `tests/integration/archive-and-merge.test.ts`, as the restricted role in every case:
+salesperson refused, ADMIN refused, manager refused for an out-of-scope record, authorship
+preserved, nothing deleted.
+
+---
+
+### ADR-027 — A `MERGED` opportunity event type
+
+**Status:** accepted, 2026-08-20 · **Extends `opportunity_event_type`; no new table**
+
+ADR-008 makes account merge irreversible in V1, which raises the bar on its audit rather than
+lowering it: what the merge moved must be recoverable by reading. §9.2 requires every
+system-recorded change to an opportunity to appear in `opportunity_events`, and CLAUDE.md §13
+requires the trigger on `opportunities` to remain that table's **single writer** — so the merge
+cannot insert its own audit row, and none of the eight existing event types means "this
+opportunity was moved to another customer record".
+
+**Decision.** Add `MERGED` to `opportunity_event_type` and extend the trigger to write it whenever
+`account_id` changes, carrying `from_account_id`, `to_account_id` and the ADR-001 reason. Nothing
+but `merge_accounts` moves an opportunity between accounts, so any such change **is** a merge.
+
+**No merge-history subsystem and no twelfth table** — the phase brief rejects both, and one event
+row per moved opportunity is the audit ADR-008 asks for.
+
+The enum value gets its own migration (`023`). PostgreSQL refuses to use a new enum value inside
+the transaction that added it, and the Supabase CLI applies each migration file in its own
+transaction; splitting them is what keeps the sequence applyable from empty in one pass.
+
+---
+
+### ADR-028 — Resend is called over HTTP; the SDK is not installed
+
+**Status:** accepted, 2026-08-20 · **No new dependency**
+
+§17.1 names Resend as the V1 email implementation and freezes the dependency list. Resend's send
+endpoint is a single authenticated POST, and the SDK would ship a wrapper around `fetch` to make
+it.
+
+**Decision.** `services/integrations/notification.ts` calls the HTTP API directly. Resend remains
+the implementation; only the client is ours. This is the same call the repository already made
+twice — `Intl` instead of `date-fns-tz` (M-13), a hand-rolled magic-byte check instead of
+`file-type` (M-14).
+
+**M-28 still binds.** `RESEND_API_KEY` and `RESEND_FROM_EMAIL` are both required. A deployment
+missing either does **not** silently pretend to send: the jobs count the attempts as failures and
+log the reason, which is what an operator needs to see.
+
+---
+
+### ADR-029 — `automation.service.ts` is a permitted service-role caller
+
+**Status:** accepted, 2026-08-20 · **Clarifies ADR-009's "cron routes"**
+
+ADR-009 permits three service-role callers, one of them "cron routes". CLAUDE.md §8 requires the
+business logic to live in `src/services/*` and route handlers to do four things only. Those two
+rules together mean the code that actually needs the service-role client is the service the cron
+routes call, not the route files.
+
+**Decision.** The ESLint boundary lists `src/services/automation.service.ts` alongside the cron
+routes, the import executor and user provisioning. The routes stay thin: authenticate, call, map.
+The permitted set is still exactly the cron execution path, the import executor and user
+provisioning — expressed where the code lives.
+
+`src/features/management` was also added to the §18 feature-boundary list, which it had been
+missing since Master Phase 3, so the no-cross-feature-import rule is now enforced on it.
+
+---
+
+### ADR-030 — Two optional import columns the schema requires and §20.2 predates
+
+**Status:** accepted, 2026-08-20
+
+§20.2's templates were written before ADR-016 replaced §5.3's free-text `branch` with a real
+outlet reference, and `accounts.outlet_id` is `not null`. `contacts.owner_id` is `not null` and
+§20.2's contact template has no owner column at all. Neither can be satisfied by the templates as
+written, and neither may be invented (CLAUDE.md §15).
+
+**Decision.** Two **optional** columns, both defaulting to something already true rather than to a
+guess:
+
+| Column | Entity | Default when blank |
+|---|---|---|
+| `outlet_code` | accounts | the owner's current outlet |
+| `owner_email` | contacts | the linked customer's owner, else the person running the import |
+
+A row that cannot resolve either way is an **ERROR** with a message naming the column — never a
+silently invented value. `source` defaults to `OTHER` rather than §5.3's `WALK_IN` for the same
+reason: a paper register says nothing about how the customer arrived, and recording every
+historical customer as a walk-in would put invented data into the source report.
+
+---
+
 ## Master Phase 2 corrections
 
 Three defects were found and fixed while building the Core CRM. Recorded here because each

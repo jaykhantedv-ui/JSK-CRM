@@ -13,6 +13,11 @@ import {
   updateOpportunity,
 } from '@/services/opportunity.service'
 import type { Stage } from '@/lib/opportunity/transitions'
+import {
+  attachQuotationFile,
+  createSignedDownloadUrl,
+  createSignedUpload,
+} from '@/services/storage.service'
 
 /**
  * Opportunity Server Actions.
@@ -223,4 +228,47 @@ export async function bulkReassignAction(
   } catch (error) {
     return stateFromError(error, valuesFrom(formData))
   }
+}
+
+/**
+ * §8.6 — quotation PDFs on the opportunity.
+ *
+ * Lightweight by design: the quotation document itself is produced in the
+ * existing system, and V1 stores a reference plus the file. **No line items, no
+ * pricing engine, no revision table, no quotation table** — the paths live on the
+ * opportunity row (migration 024) exactly as site-visit photos live on the
+ * activity.
+ */
+export async function requestQuotationUploadAction(input: {
+  entityId: string
+  fileName: string
+  size: number
+  mimeType: string
+  head: string
+}) {
+  const { path, token } = await createSignedUpload({
+    entityType: 'opportunity',
+    entityId: input.entityId,
+    fileName: input.fileName,
+    size: input.size,
+    mimeType: input.mimeType,
+    head: input.head,
+  })
+  return { path, token }
+}
+
+export async function attachQuotationFileAction(input: { entityId: string; path: string }) {
+  const paths = await attachQuotationFile(input)
+  revalidatePath(`/opportunities/${input.entityId}`)
+  return paths
+}
+
+/**
+ * A 60-second URL for one stored file (§15.6).
+ *
+ * Minted on demand rather than rendered into the page: a URL embedded in HTML
+ * outlives the page in a browser history, and a minute is the whole point.
+ */
+export async function getFileUrlAction(path: string): Promise<string> {
+  return createSignedDownloadUrl(path)
 }

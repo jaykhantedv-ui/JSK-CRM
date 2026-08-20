@@ -19,6 +19,15 @@ export type FormState = {
   error: string | null
   fieldErrors: Record<string, string>
   values?: Record<string, string>
+  /**
+   * The id of the record the action just created.
+   *
+   * Needed by any flow that continues working on the new record without leaving
+   * the screen — a site visit whose photographs upload AFTER the activity is
+   * safely committed (§11.5), so a failed upload costs the photo and never the
+   * activity.
+   */
+  createdId?: string
 }
 
 export const IDLE_FORM_STATE: FormState = { ok: false, error: null, fieldErrors: {} }

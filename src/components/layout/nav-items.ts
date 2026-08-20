@@ -1,10 +1,10 @@
 import {
-  Building2, CalendarCheck, ChartColumn, LayoutDashboard, Settings, Store, Target, Upload,
-  Users, UsersRound,
+  Archive, Building2, CalendarCheck, ChartColumn, LayoutDashboard, Settings, Store, Target,
+  Upload, Users, UsersRound,
 } from 'lucide-react'
 
 import type { SessionUser } from '@/types/domain'
-import { canViewTeamDashboard, canEditSettings, canImportCsv } from '@/lib/permissions'
+import { canArchive, canViewTeamDashboard, canEditSettings, canImportCsv } from '@/lib/permissions'
 
 /**
  * The navigation model (§12.3), shared by the mobile tab bar and the desktop
@@ -33,6 +33,7 @@ export const SECONDARY_NAV: NavItem[] = [
   { href: '/contacts', label: 'Contacts', icon: UsersRound },
   { href: '/team', label: 'Team', icon: Store, visible: canViewTeamDashboard },
   { href: '/reports', label: 'Reports', icon: ChartColumn, visible: canViewTeamDashboard },
+  { href: '/archive', label: 'Archive', icon: Archive, visible: canArchive },
   { href: '/import', label: 'Import', icon: Upload, visible: canImportCsv },
   { href: '/settings', label: 'Settings', icon: Settings, visible: canEditSettings },
 ]

@@ -603,3 +603,46 @@ Four properties worth knowing before editing the file:
 Grants are made **function by function**. A blanket `grant execute on all functions in schema
 public` re-exposed the SECURITY DEFINER trigger functions migration 018 had deliberately revoked —
 `tests/integration/service-contracts.test.ts` caught it.
+
+
+---
+
+## Migrations 023–027 — Master Phase 4
+
+| # | File | What it adds | Why a new number |
+|---|---|---|---|
+| 023 | `merge_event_type.sql` | `MERGED` on `opportunity_event_type` | PostgreSQL refuses to **use** a new enum value inside the transaction that added it, and the CLI applies each file in its own transaction. Alone, so 025 can cast to it. |
+| 024 | `storage.sql` | Private `crm-files` bucket · `safe_uuid`, `can_read_activity`, `can_read_storage_path`, `can_write_storage_path` · policies on `storage.objects` · `opportunities.quotation_file_paths` · **`v_opportunity_flags` recreated** | New objects |
+| 025 | `operations_rpcs.sql` | `import_rollback_days` · `archive_account` / `restore_account` · `count_live_account_children` · `merge_accounts` · `execute_import` · `rollback_import` · trigger extended for `MERGED` | New objects |
+| 026 | `contacts_import_columns.sql` | `contacts.is_imported`, `legacy_ref`, `import_batch_id` + indexes | **Defect fix, forward.** 007 had been applied; H-03 and §21.2 require a new number |
+| 027 | `maintenance.sql` | `maintenance_excluded_batches` · `run_maintenance` | New objects |
+
+### Storage authorization is the path prefix
+
+`crm-files/{account|project|opportunity|activity}/{id}/{uuid}-{filename}`
+
+`can_read_storage_path()` splits the name, refuses anything whose second segment is not a uuid or
+whose first is not one of the four kinds — **there is no default-allow branch** — and otherwise
+delegates to the same `can_read_*` helper the table policies use. A file is therefore visible to
+exactly the people who can see the entity it hangs off, and the service that issues signed URLs
+cannot drift away from that rule because it is not the one enforcing it.
+
+`can_write_storage_path()` is deliberately the **same** rule rather than §15.6's literal "any
+authenticated user may INSERT": a user who cannot see an opportunity has no business writing into
+its folder, and the object would then be readable by everyone entitled to that record.
+
+**No DELETE policy on `storage.objects`.** A reviewer grepping the schema for `for delete` still
+finds exactly one policy, on `project_stakeholders` (ADR-004).
+
+### Two things worth knowing before editing this schema
+
+**`v_opportunity_flags` is `select o.*`, and PostgreSQL expands that star at creation time.** A
+column added to `opportunities` afterwards does **not** appear in the view — silently, with no
+error anywhere. Migration 024 recreates the view in the same file that adds
+`quotation_file_paths`. Any future column on `opportunities` must do the same, or every screen
+reading through the flags view will be missing it.
+
+**`now()` is transaction start time.** `rollback_import` decides "has this been edited?" with
+`updated_at > completed_at`, which is exact across transactions and deliberately equal within one —
+the import's own writes must not count as edits. A test that imports and edits inside a single
+transaction has to backdate `completed_at` to reproduce the gap that exists in reality.

@@ -323,3 +323,55 @@ response without saying so. A manager who exports 1,000 of 3,000 rows and totals
 spreadsheet gets a wrong number with no indication anything is missing, so the export is refused
 with a message naming which filter to narrow. There is a second guard for the same failure: if the
 transport ever returns fewer rows than it counted, the export is refused rather than written short.
+
+
+---
+
+## `/api/cron/*` — Master Phase 4
+
+**These routes authenticate by shared secret and are exempt from the session middleware.**
+
+`middleware.ts` returns `NextResponse.next()` for `/api/cron/*` before it reaches
+`updateSession`, because a scheduler sends a bearer token and no cookie jar. **Each route then
+validates `CRON_SECRET` itself** through `requireCronAuth` — the exemption removes a check that
+was never the control here; it does not remove the control. A cron route with no `requireCronAuth`
+call is unprotected, which is why every one of them is tested for the missing-secret and
+wrong-secret cases.
+
+| Route | §14 | Schedule (UTC) |
+|---|---|---|
+| `/api/cron/new-opportunity-sla` | 14.2 | `0 * * * *` |
+| `/api/cron/daily-digest` | 14.3 | `0 3 * * *` |
+| `/api/cron/manager-digest` | 14.4 | `30 3 * * *` |
+| `/api/cron/owner-summary` | 14.5 | `0 * * * *` — hourly trigger, in-route gate (ADR-011) |
+| `/api/cron/maintenance` | 14.6 | `30 20 * * *` |
+
+**Request.** `GET` (or `POST`) with `Authorization: Bearer $CRON_SECRET`. `x-cron-secret` is
+accepted as an alternative during an incident.
+
+**Response.** `{ processed, sent, failed, durationMs }` — on the failure path too, with HTTP 500
+and `failed: 1`. Never a stack trace, never a partial body.
+
+**Refusal.** `401` with `{"error":"unauthorized"}`. **Never a redirect**: a redirect answers a
+scheduler with 200 and a page of HTML, which reads as a successful run and hides a broken job
+indefinitely. An unset `CRON_SECRET` refuses every request rather than allowing them.
+
+## `/api/import-template/{entity}` — Master Phase 4
+
+Headers only, **no sample row** — a fixture that ships looks like data (CLAUDE.md §15).
+OWNER/ADMIN only; answers `401`/`403` with a status line rather than a redirect, so a script can
+tell refusal from success.
+
+## Storage — the ADR-005 upload path
+
+1. **Server Action** `createSignedUpload` — checks the caller can see the parent entity, validates
+   size, name and the file's first bytes, returns a short-lived URL naming **one** path.
+2. **Browser** PUTs the bytes to that URL. *This is the only client-side Supabase write in the
+   system.*
+3. **Server Action** `attachQuotationFile` / `attachActivityPhoto` — re-checks the bytes Storage
+   actually holds, then writes the path onto the row.
+
+Step 3 is what makes the magic-byte guarantee real: a client that lied in step 1 and uploaded an
+executable still never gets a row pointing at it, and a file no row references is invisible to
+every screen. Reads go through `createSignedDownloadUrl`, 60 seconds, minted on click — never
+rendered into the page.

@@ -269,8 +269,11 @@ export type Database = {
           email: string | null
           full_name: string
           id: string
+          import_batch_id: string | null
           influence: Database["public"]["Enums"]["influence_level"]
+          is_imported: boolean
           is_referral_source: boolean
+          legacy_ref: string | null
           linked_account_id: string | null
           notes: string | null
           owner_id: string
@@ -290,8 +293,11 @@ export type Database = {
           email?: string | null
           full_name: string
           id?: string
+          import_batch_id?: string | null
           influence?: Database["public"]["Enums"]["influence_level"]
+          is_imported?: boolean
           is_referral_source?: boolean
+          legacy_ref?: string | null
           linked_account_id?: string | null
           notes?: string | null
           owner_id: string
@@ -311,8 +317,11 @@ export type Database = {
           email?: string | null
           full_name?: string
           id?: string
+          import_batch_id?: string | null
           influence?: Database["public"]["Enums"]["influence_level"]
+          is_imported?: boolean
           is_referral_source?: boolean
+          legacy_ref?: string | null
           linked_account_id?: string | null
           notes?: string | null
           owner_id?: string
@@ -342,6 +351,13 @@ export type Database = {
             columns: ["created_by"]
             isOneToOne: false
             referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "contacts_import_batch_id_fkey"
+            columns: ["import_batch_id"]
+            isOneToOne: false
+            referencedRelation: "import_batches"
             referencedColumns: ["id"]
           },
           {
@@ -497,6 +513,7 @@ export type Database = {
           project_id: string | null
           quantity_unit: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date: string | null
+          quotation_file_paths: string[]
           quotation_ref: string | null
           quotation_status: Database["public"]["Enums"]["quotation_status"]
           quotation_valid_until: string | null
@@ -538,6 +555,7 @@ export type Database = {
           project_id?: string | null
           quantity_unit?: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date?: string | null
+          quotation_file_paths?: string[]
           quotation_ref?: string | null
           quotation_status?: Database["public"]["Enums"]["quotation_status"]
           quotation_valid_until?: string | null
@@ -579,6 +597,7 @@ export type Database = {
           project_id?: string | null
           quantity_unit?: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date?: string | null
+          quotation_file_paths?: string[]
           quotation_ref?: string | null
           quotation_status?: Database["public"]["Enums"]["quotation_status"]
           quotation_valid_until?: string | null
@@ -1182,6 +1201,7 @@ export type Database = {
           project_id: string | null
           quantity_unit: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date: string | null
+          quotation_file_paths: string[] | null
           quotation_ref: string | null
           quotation_status:
             Database["public"]["Enums"]["quotation_status"] | null
@@ -1232,6 +1252,7 @@ export type Database = {
           project_id?: string | null
           quantity_unit?: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date?: string | null
+          quotation_file_paths?: string[] | null
           quotation_ref?: string | null
           quotation_status?:
             Database["public"]["Enums"]["quotation_status"] | null
@@ -1282,6 +1303,7 @@ export type Database = {
           project_id?: string | null
           quantity_unit?: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date?: string | null
+          quotation_file_paths?: string[] | null
           quotation_ref?: string | null
           quotation_status?:
             Database["public"]["Enums"]["quotation_status"] | null
@@ -1348,15 +1370,27 @@ export type Database = {
       }
     }
     Functions: {
+      archive_account: {
+        Args: { p_account_id: string; p_reason?: string }
+        Returns: {
+          accounts: number
+          contacts: number
+          opportunities: number
+          projects: number
+        }[]
+      }
       assert_management_access: { Args: never; Returns: undefined }
       bulk_reassign: {
         Args: { p_from_user: string; p_reason: string; p_to_user: string }
         Returns: number
       }
       can_read_account: { Args: { a: string }; Returns: boolean }
+      can_read_activity: { Args: { p_activity: string }; Returns: boolean }
       can_read_opportunity: { Args: { o: string }; Returns: boolean }
       can_read_project: { Args: { p: string }; Returns: boolean }
+      can_read_storage_path: { Args: { p_name: string }; Returns: boolean }
       can_write_project: { Args: { p: string }; Returns: boolean }
+      can_write_storage_path: { Args: { p_name: string }; Returns: boolean }
       change_opportunity_stage: {
         Args: {
           p_competitor?: string
@@ -1404,6 +1438,7 @@ export type Database = {
           project_id: string | null
           quantity_unit: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date: string | null
+          quotation_file_paths: string[]
           quotation_ref: string | null
           quotation_status: Database["public"]["Enums"]["quotation_status"]
           quotation_valid_until: string | null
@@ -1421,6 +1456,10 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      count_live_account_children: {
+        Args: { p_account_id: string }
+        Returns: number
       }
       create_account_with_opportunity: {
         Args: {
@@ -1451,6 +1490,14 @@ export type Database = {
         }[]
       }
       current_user_id: { Args: never; Returns: string }
+      execute_import: {
+        Args: { p_batch_id: string }
+        Returns: {
+          imported: number
+          linked: number
+          skipped: number
+        }[]
+      }
       find_account_duplicates: {
         Args: {
           p_city?: string
@@ -1475,6 +1522,7 @@ export type Database = {
           status: Database["public"]["Enums"]["account_status"]
         }[]
       }
+      import_rollback_days: { Args: never; Returns: number }
       is_manager_or_above: { Args: never; Returns: boolean }
       is_owner: { Args: never; Returns: boolean }
       is_owner_or_admin: { Args: never; Returns: boolean }
@@ -1503,6 +1551,7 @@ export type Database = {
           opportunity_id: string
         }[]
       }
+      maintenance_excluded_batches: { Args: never; Returns: string[] }
       management_at_risk: {
         Args: {
           p_dormancy_days: number
@@ -1764,6 +1813,15 @@ export type Database = {
       }
       manages_outlet: { Args: { p_outlet: string }; Returns: boolean }
       manages_user: { Args: { p_user: string }; Returns: boolean }
+      merge_accounts: {
+        Args: { p_reason?: string; p_source_id: string; p_target_id: string }
+        Returns: {
+          activities: number
+          contacts: number
+          opportunities: number
+          projects: number
+        }[]
+      }
       normalize_phone: { Args: { raw: string }; Returns: string }
       owns_opportunity_on_account: { Args: { a: string }; Returns: boolean }
       owns_opportunity_on_project: { Args: { p: string }; Returns: boolean }
@@ -1800,6 +1858,7 @@ export type Database = {
           project_id: string | null
           quantity_unit: Database["public"]["Enums"]["quantity_unit"] | null
           quotation_date: string | null
+          quotation_file_paths: string[]
           quotation_ref: string | null
           quotation_status: Database["public"]["Enums"]["quotation_status"]
           quotation_valid_until: string | null
@@ -1818,6 +1877,33 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      restore_account: {
+        Args: { p_account_id: string; p_reason?: string }
+        Returns: {
+          accounts: number
+          contacts: number
+          opportunities: number
+          projects: number
+        }[]
+      }
+      rollback_import: {
+        Args: { p_batch_id: string }
+        Returns: {
+          accounts: number
+          contacts: number
+        }[]
+      }
+      run_maintenance: {
+        Args: { p_account_dormancy_days: number }
+        Returns: {
+          corrected_accounts: number
+          corrected_ids: Json
+          corrected_opportunities: number
+          dormant_accounts: number
+          expired_quotations: number
+        }[]
+      }
+      safe_uuid: { Args: { p_text: string }; Returns: string }
       scoped_outlet_ids: { Args: never; Returns: string[] }
       search_crm: {
         Args: { p_limit?: number; p_query: string }
@@ -1948,6 +2034,7 @@ export type Database = {
         | "REOPENED"
         | "ARCHIVED"
         | "RESTORED"
+        | "MERGED"
       opportunity_stage:
         | "new"
         | "qualified"
@@ -2250,6 +2337,7 @@ export const Constants = {
         "REOPENED",
         "ARCHIVED",
         "RESTORED",
+        "MERGED",
       ],
       opportunity_stage: [
         "new",

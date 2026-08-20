@@ -86,3 +86,111 @@ export function csvFilename(dataset: string, isoDate: string): string {
 }
 
 export const CSV_CONTENT_TYPE = 'text/csv; charset=utf-8'
+
+/**
+ * Parse a CSV file (§20.1).
+ *
+ * Hand-rolled, and deliberately so: §17.1 freezes the dependency list, and the
+ * subset of RFC 4180 an import file actually needs — quoted fields, escaped
+ * quotes, embedded newlines, CRLF or LF, a UTF-8 BOM — is small enough to read in
+ * one screen. A parser dependency would be more surface than the format.
+ *
+ * Headers are lower-cased and trimmed so `Owner Email`, `owner_email` and
+ * `OWNER_EMAIL` are the same column. A business preparing its first export from a
+ * paper register should not lose an afternoon to a capital letter.
+ *
+ * Rows shorter than the header are padded with empty strings rather than
+ * rejected: a trailing empty column is the single most common thing a
+ * spreadsheet emits, and treating it as a structural error would fail whole files
+ * for nothing. A row with MORE cells than headers is a genuine misalignment and
+ * is reported.
+ */
+export type ParsedCsv = {
+  headers: string[]
+  rows: Record<string, string>[]
+  /** Row numbers (1-based, header excluded) whose cell count exceeded the header. */
+  malformedRows: number[]
+}
+
+function splitCsv(text: string): string[][] {
+  const records: string[][] = []
+  let field = ''
+  let record: string[] = []
+  let inQuotes = false
+
+  // Strip the BOM Excel writes; left in place it becomes part of the first
+  // header name and every lookup against that column misses.
+  const source = text.replace(/^﻿/, '')
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]
+
+    if (inQuotes) {
+      if (char === '"') {
+        // A doubled quote inside a quoted field is a literal quote (RFC 4180).
+        if (source[i + 1] === '"') {
+          field += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else {
+        field += char
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+    } else if (char === ',') {
+      record.push(field)
+      field = ''
+    } else if (char === '\r') {
+      // Consume CRLF as one terminator; a lone CR is treated the same way.
+      if (source[i + 1] === '\n') i += 1
+      record.push(field)
+      records.push(record)
+      field = ''
+      record = []
+    } else if (char === '\n') {
+      record.push(field)
+      records.push(record)
+      field = ''
+      record = []
+    } else {
+      field += char
+    }
+  }
+
+  // The final record, when the file does not end with a newline.
+  if (field.length > 0 || record.length > 0) {
+    record.push(field)
+    records.push(record)
+  }
+
+  return records
+}
+
+export function parseCsv(text: string): ParsedCsv {
+  const records = splitCsv(text).filter(
+    (record) => !(record.length === 1 && record[0].trim() === ''),
+  )
+
+  if (records.length === 0) return { headers: [], rows: [], malformedRows: [] }
+
+  const headers = records[0].map((header) => header.trim().toLowerCase())
+  const rows: Record<string, string>[] = []
+  const malformedRows: number[] = []
+
+  records.slice(1).forEach((record, index) => {
+    if (record.length > headers.length) malformedRows.push(index + 1)
+
+    const row: Record<string, string> = {}
+    headers.forEach((header, column) => {
+      row[header] = (record[column] ?? '').trim()
+    })
+    rows.push(row)
+  })
+
+  return { headers, rows, malformedRows }
+}

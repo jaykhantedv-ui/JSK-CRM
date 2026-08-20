@@ -19,7 +19,16 @@ import { logActivityAction } from '@/features/activities/actions'
 import { getAccount360 } from '@/services/account.service'
 import { userNames } from '@/services/reference.service'
 import type { NextActionType, OpportunityStage, ProductCategory } from '@/types/domain'
+import {
+  attachActivityPhotoAction,
+  requestActivityPhotoUploadAction,
+} from '@/features/activities/actions'
 import { LogActivityPanel } from '@/features/activities/log-activity-panel'
+import { archiveRecordAction } from '@/features/archive/actions'
+import { ArchiveControl } from '@/features/archive/archive-control'
+import { isManagerOrAbove } from '@/lib/permissions'
+import { previewArchive } from '@/services/archive.service'
+import { requireUser } from '@/services/auth.service'
 
 type Params = Promise<{ id: string }>
 
@@ -56,8 +65,15 @@ export default async function AccountDetailPage({
 }) {
   const { id } = await params
   const query = await searchParams
-  const [detail, names] = await Promise.all([getAccount360(id), userNames()])
+  const [user, detail, names] = await Promise.all([requireUser(), getAccount360(id), userNames()])
   const { account, openOpportunities, closedOpportunities, projects, recentActivities } = detail
+
+  // C-3 step 1: the preview is computed up front so the confirmation panel can
+  // show exactly what the archive will affect. Managers only — for anyone else
+  // the control is not rendered, and `guard_record_scope()` would refuse them
+  // anyway (§15).
+  const canManage = isManagerOrAbove(user)
+  const archivePreview = canManage ? await previewArchive('account', account.id) : null
 
   // The soonest open next action across this customer's opportunities.
   const nextUp = openOpportunities
@@ -171,6 +187,8 @@ export default async function AccountDetailPage({
         <CardHeader>
           <CardTitle>Recent activity</CardTitle>
           <LogActivityPanel
+            requestPhotoUpload={requestActivityPhotoUploadAction}
+            attachPhoto={attachActivityPhotoAction}
             action={logAction}
             opportunities={openOpportunities.map((row) => ({
               id: row.id,
@@ -264,9 +282,26 @@ export default async function AccountDetailPage({
       <Card>
         <CardHeader>
           <CardTitle>Details</CardTitle>
-          <Link href={`/accounts/${account.id}/edit`} className={buttonClass('outline', 'sm')}>
-            Edit
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link href={`/accounts/${account.id}/edit`} className={buttonClass('outline', 'sm')}>
+              Edit
+            </Link>
+            {/* §8.9 and §8.8 — management actions, hidden for everyone else. */}
+            {canManage ? (
+              <Link
+                href={`/accounts/${account.id}/merge`}
+                className={buttonClass('outline', 'sm')}
+              >
+                Merge
+              </Link>
+            ) : null}
+            {archivePreview ? (
+              <ArchiveControl
+                preview={archivePreview}
+                action={archiveRecordAction.bind(null, { entity: 'account', id: account.id })}
+              />
+            ) : null}
+          </div>
         </CardHeader>
         <CardBody>
           <dl className="grid gap-3 text-sm sm:grid-cols-2">

@@ -410,3 +410,58 @@ They are written against the real application and run with `E2E_SUPABASE_READY=1
 What does run without auth: the extended smoke suite, which now covers `/team` and every `/reports`
 route, and asserts that `/api/export/opportunities` answers a signed-out caller **401 rather than a
 302 to an HTML login page** — the assertion that found ADR-024.
+
+
+---
+
+## Master Phase 4 — operations, data and automation
+
+### Counts
+
+| Suite | Files | Tests |
+|---|---|---|
+| Unit (Vitest) | 19 | **482** |
+| Integration / RLS (Vitest + PostgreSQL) | 14 | **403** |
+| E2E (Playwright) | 4 | **59 passing, 32 skipped** |
+
+### New unit suites
+
+| File | Covers |
+|---|---|
+| `files.test.ts` | Magic-byte detection for the four allowed types; **a disguised executable is refused on its bytes** (§19.4); a RIFF container that is not a WebP; size limits; filename sanitisation against path traversal; the §15.6 path format |
+| `import-validation.test.ts` | Every §20.3 rule — required fields, phone, email, reachability, enum tolerance, unknown owner, unknown outlet, unknown city as a WARNING, in-file duplicates as ERRORs on **every** row sharing the value, duplicates against existing records |
+| `csv-parse.test.ts` | BOM, CRLF, quoted commas, doubled quotes, embedded newlines, short and long rows |
+| `cron-auth.test.ts` | Missing, wrong and correct secrets; **never a redirect**; an unset `CRON_SECRET` refuses everything; the §14.7 response shape on both the success and the failure path |
+| `automation.test.ts` | The ADR-011 hour gate across all 24 hours and in IST rather than UTC; weekly cadence; §20.6 rollback eligibility at both edges of the window |
+
+### New integration suites
+
+| File | Covers |
+|---|---|
+| `import-execution.test.ts` | Atomicity (one bad row → **nothing** created); undecided duplicates block the run; SKIP / IMPORT / **LINK_EXISTING never overwrites a field, including an existing `legacy_ref`**; provenance columns; rollback archives and never deletes; rollback refused after an edit and after seven days; permissions as salesperson, manager, admin |
+| `archive-and-merge.test.ts` | The cascade and its shared timestamp; activities and events **never** archived; restore does not resurrect a separately archived child; pipeline value drops; MERGED event metadata; authorship preserved; salesperson, ADMIN and out-of-scope manager all refused |
+| `storage-authorization.test.ts` | Per-role visibility by path prefix; malformed and unknown paths refused for everyone; ADMIN sees no business files; work context reaches attachments; **no delete policy**; writes into an invisible parent refused |
+| `automation-state.test.ts` | Dormancy, quotation expiry, `last_activity_at` corrections reported not suppressed; **H-09 — a maintenance run leaves rollback-window imports untouched and rollback still succeeds**; SLA deduplication; imported opportunities never SLA-eligible; settings permissions per role |
+
+### E2E — what runs and what does not
+
+**Two of the ten §19.3 operations scenarios run for real here.** The cron routes authenticate by
+**shared secret**, not by session, so `tests/e2e/operations.spec.ts` exercises the real routes, the
+real middleware exemption and the real §14.7 contract against a running server — 25 assertions
+across the five routes, on every commit.
+
+**Eight cannot, and are not pretended to.** Everything involving a signed-in user needs Supabase
+Auth; everything involving a file needs Supabase Storage. ADR-018 records why neither runs in this
+environment. Those specs are written against the real application and **skip with a stated
+reason**; they never report as passed.
+
+Run them against a real project with:
+
+```bash
+E2E_SUPABASE_READY=1 npm run test:e2e
+```
+
+**The skipped behaviour is not unverified.** Import execution, duplicate decisions,
+`LINK_EXISTING`, rollback, archive, restore, merge and every storage authorization rule are proved
+against a real PostgreSQL server in the four integration suites above — which is where §19.2 says
+the authorization model is actually verified. What E2E would add is the browser layer.

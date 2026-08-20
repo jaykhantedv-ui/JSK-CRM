@@ -34,6 +34,14 @@ export default defineConfig({
       NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? 'http://127.0.0.1:54321',
       NEXT_PUBLIC_SUPABASE_ANON_KEY:
         process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? 'e2e-smoke-anon-key',
+      // The cron suite is the one part of §19.3 that needs NO Supabase session:
+      // `/api/cron/*` authenticates by shared secret, so its refusal and its
+      // response contract are genuinely testable here. A well-formed value is
+      // all that is required — the secret guards the route, it does not reach
+      // any external service.
+      CRON_SECRET: process.env.CRON_SECRET ?? 'e2e-cron-secret-value',
+      SUPABASE_SERVICE_ROLE_KEY:
+        process.env.SUPABASE_SERVICE_ROLE_KEY ?? 'e2e-service-role-key',
     },
   },
 })

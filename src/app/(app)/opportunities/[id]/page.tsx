@@ -15,11 +15,21 @@ import { isManagerOrAbove } from '@/lib/permissions'
 import { logActivityAction } from '@/features/activities/actions'
 import { NextActionControl } from '@/features/opportunities/next-action-control'
 import { ReassignControl, ReopenControl } from '@/features/opportunities/reassign-control'
+import {
+  attachQuotationFileAction,
+  getFileUrlAction,
+  requestQuotationUploadAction,
+} from '@/features/opportunities/actions'
+import { QuotationFiles } from '@/features/opportunities/quotation-files'
 import { StageControl } from '@/features/opportunities/stage-control'
 import { requireUser } from '@/services/auth.service'
 import { getOpportunityDetail } from '@/services/opportunity.service'
 import { assignableUserOptions, userNames } from '@/services/reference.service'
 import type { NextActionType, OpportunityStage, ProductCategory } from '@/types/domain'
+import {
+  attachActivityPhotoAction,
+  requestActivityPhotoUploadAction,
+} from '@/features/activities/actions'
 import { LogActivityPanel } from '@/features/activities/log-activity-panel'
 
 type Params = Promise<{ id: string }>
@@ -59,6 +69,11 @@ export default async function OpportunityDetailPage({ params }: { params: Params
 
   const stage = opportunity.stage as OpportunityStage
   const closed = stage === 'won' || stage === 'lost'
+
+  // Rendering only. `opportunities_update` and the storage policies decide
+  // whether the upload is actually permitted; this stops the UI offering a
+  // control the database would refuse (§15).
+  const canWrite = !closed && (isManagerOrAbove(user) || opportunity.owner_id === user.id)
 
   const logAction = logActivityAction.bind(null, {
     accountId: account.id,
@@ -168,6 +183,8 @@ export default async function OpportunityDetailPage({ params }: { params: Params
         <CardHeader>
           <CardTitle>Activity</CardTitle>
           <LogActivityPanel
+            requestPhotoUpload={requestActivityPhotoUploadAction}
+            attachPhoto={attachActivityPhotoAction}
             action={logAction}
             opportunities={[{ id: opportunity.id as string, title: opportunity.title as string, stage }]}
             defaultOpportunityId={opportunity.id as string}
@@ -209,6 +226,23 @@ export default async function OpportunityDetailPage({ params }: { params: Params
               value={opportunity.expected_close_date ? formatDate(opportunity.expected_close_date) : null}
             />
           </dl>
+
+          {/*
+            §8.6 — the quotation document itself is produced in the existing
+            system; this holds the PDF. Private storage, sixty-second links, no
+            quotation table (§4.2).
+          */}
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-2 text-sm font-medium">Quotation file</h3>
+            <QuotationFiles
+              opportunityId={opportunity.id as string}
+              paths={opportunity.quotation_file_paths ?? []}
+              canUpload={canWrite}
+              requestUpload={requestQuotationUploadAction}
+              attach={attachQuotationFileAction}
+              getUrl={getFileUrlAction}
+            />
+          </div>
         </CardBody>
       </Card>
 

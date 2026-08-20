@@ -10,8 +10,8 @@
 -- nothing in supabase/migrations may depend on anything defined here beyond the
 -- objects Supabase itself guarantees:
 --   * roles      anon, authenticated, service_role, authenticator, supabase_admin
---   * schemas    auth, extensions, graphql_public
---   * table      auth.users
+--   * schemas    auth, extensions, graphql_public, storage
+--   * tables     auth.users, storage.buckets, storage.objects
 --   * functions  auth.uid(), auth.jwt(), auth.role(), auth.email()
 --
 -- The auth.* function bodies are the platform's own definitions: they read the
@@ -129,3 +129,53 @@ grant execute on function auth.jwt(), auth.uid(), auth.role(), auth.email()
 alter default privileges in schema public grant all on tables to postgres, service_role;
 alter default privileges in schema public grant all on functions to postgres, service_role;
 alter default privileges in schema public grant all on sequences to postgres, service_role;
+
+-- storage ---------------------------------------------------------------------
+-- Supabase Storage's own tables, reproduced to the subset the application
+-- depends on, so that migration 024's bucket policies are applied and TESTED
+-- here rather than merely written and hoped for. On a real project these are
+-- created by the platform in the `storage` schema and owned by
+-- `supabase_storage_admin`.
+--
+-- Only the columns the policies and the service read are present. Inventing the
+-- rest would be inventing platform behaviour, which this file exists not to do.
+create schema if not exists storage;
+grant usage on schema storage to anon, authenticated, service_role, postgres;
+
+create table if not exists storage.buckets (
+  id                 text primary key,
+  name               text not null,
+  owner              uuid,
+  public             boolean not null default false,
+  file_size_limit    bigint,
+  allowed_mime_types text[],
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+
+create table if not exists storage.objects (
+  id               uuid primary key default gen_random_uuid(),
+  bucket_id        text not null references storage.buckets(id),
+  name             text not null,
+  owner            uuid,
+  metadata         jsonb,
+  path_tokens      text[] generated always as (string_to_array(name, '/')) stored,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  last_accessed_at timestamptz not null default now()
+);
+
+create unique index if not exists objects_bucket_name_unique on storage.objects (bucket_id, name);
+
+alter table storage.objects enable row level security;
+alter table storage.buckets enable row level security;
+
+-- Supabase grants the API roles table access on storage.objects and relies on RLS
+-- to control it, exactly as it does in `public`. `anon` is granted here for the
+-- same reason: a test proving an unauthenticated caller sees nothing must be
+-- proving the POLICY refused them, not that a missing grant did.
+grant select on storage.buckets to anon, authenticated, service_role;
+grant select on storage.objects to anon;
+grant select, insert, update on storage.objects to authenticated;
+grant all on storage.objects to service_role;
+grant all on storage.buckets to service_role;

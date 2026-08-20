@@ -11,6 +11,10 @@ import {
   CONSTRUCTION_STAGE_LABELS, PROJECT_STATUS_LABELS, PROJECT_TYPE_LABELS,
 } from '@/lib/labels'
 import { logActivityAction } from '@/features/activities/actions'
+import {
+  attachActivityPhotoAction,
+  requestActivityPhotoUploadAction,
+} from '@/features/activities/actions'
 import { LogActivityPanel } from '@/features/activities/log-activity-panel'
 import { StakeholderPanel } from '@/features/projects/stakeholder-panel'
 import { getProjectDetail } from '@/services/project.service'
@@ -171,6 +175,8 @@ export default async function ProjectDetailPage({ params }: { params: Params }) 
           <CardTitle>Activity</CardTitle>
           {logAction ? (
             <LogActivityPanel
+            requestPhotoUpload={requestActivityPhotoUploadAction}
+            attachPhoto={attachActivityPhotoAction}
               action={logAction}
               opportunities={open.map((row) => ({ id: row.id, title: row.title, stage: row.stage }))}
               defaultType="SITE_VISIT"

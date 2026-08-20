@@ -512,3 +512,139 @@ export async function createAccountWithOpportunity(
     activityId: rows.activity_id,
   }
 }
+
+/**
+ * Manual account merge (§8.9, ADR-008). MANAGER and OWNER only.
+ *
+ * **THIS IS NOT REVERSIBLE IN V1.** ADR-008 is explicit, and neither this service
+ * nor the UI may suggest otherwise — "always reversible via the audit trail" is
+ * named in the audit as a claim not to make. What is guaranteed is that the move
+ * is fully *recorded*: each moved opportunity gets a `MERGED` event carrying the
+ * source, the target and the reason, written by the trigger that is the single
+ * writer of `opportunity_events`.
+ *
+ * There is no merge-history table and no generic merge subsystem. The events plus
+ * the archived source account are the audit, which is what ADR-008 asks for.
+ */
+
+export type MergePreview = {
+  source: AccountRow
+  target: AccountRow
+  moves: { contacts: number; projects: number; opportunities: number; activities: number }
+  /** Pipeline value moving to the target, in paise. Nothing is lost in a merge. */
+  pipelineValueMovedPaise: number
+  /** Always false in V1 (ADR-008). Present so the UI cannot forget to say so. */
+  reversible: false
+}
+
+/**
+ * Everything the reviewer must see before confirming (§8.9).
+ *
+ * Read through the user's client, so a manager previewing a merge sees only what
+ * they are entitled to — and if either record is outside their scope the preview
+ * fails here rather than at confirmation time.
+ */
+export async function previewAccountMerge(
+  sourceId: string,
+  targetId: string,
+): Promise<MergePreview> {
+  const user = await requireUser()
+  const source = uuidSchema.parse(sourceId)
+  const target = uuidSchema.parse(targetId)
+
+  if (source === target) {
+    throw new AppError('VALIDATION_FAILED', 'Choose two different customers.')
+  }
+
+  // Rendering-side mirror of `merge_accounts`, which does the real check.
+  if (user.role !== 'MANAGER' && user.role !== 'OWNER') {
+    throw new AppError('FORBIDDEN', 'Only a manager or the owner can merge customers.')
+  }
+
+  const supabase = await createSupabaseServerClient()
+
+  const [sourceRow, targetRow, contacts, projects, opportunities, activities] = await Promise.all([
+    supabase.from('accounts').select(ACCOUNT_COLUMNS).eq('id', source).maybeSingle(),
+    supabase.from('accounts').select(ACCOUNT_COLUMNS).eq('id', target).maybeSingle(),
+    supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('account_id', source),
+    supabase.from('projects').select('id', { count: 'exact', head: true }).eq('account_id', source),
+    supabase.from('opportunities').select('id, estimated_value, stage').eq('account_id', source),
+    supabase.from('activities').select('id', { count: 'exact', head: true }).eq('account_id', source),
+  ])
+
+  if (!sourceRow.data || !targetRow.data) throw notFound('customer')
+  if (opportunities.error) throw fromPostgrestError(opportunities.error)
+
+  // `ACCOUNT_COLUMNS` is a concatenated string, so the typed client cannot infer
+  // the row shape from it — the same cast `getAccount` makes.
+  const sourceAccount = sourceRow.data as unknown as AccountRow
+  const targetAccount = targetRow.data as unknown as AccountRow
+
+  if (sourceAccount.archived_at || targetAccount.archived_at) {
+    throw new AppError('CONFLICT', 'An archived customer cannot take part in a merge.')
+  }
+
+  return {
+    source: sourceAccount,
+    target: targetAccount,
+    moves: {
+      contacts: contacts.count ?? 0,
+      projects: projects.count ?? 0,
+      opportunities: (opportunities.data ?? []).length,
+      activities: activities.count ?? 0,
+    },
+    pipelineValueMovedPaise: (opportunities.data ?? [])
+      .filter((row) => row.stage !== 'won' && row.stage !== 'lost')
+      .reduce((total, row) => total + (row.estimated_value ?? 0), 0),
+    reversible: false,
+  }
+}
+
+export type MergeResult = {
+  contacts: number
+  projects: number
+  opportunities: number
+  activities: number
+}
+
+/**
+ * Perform the merge. Everything moves to the target; the source is ARCHIVED,
+ * never deleted (CLAUDE.md §11).
+ *
+ * Authorization is `merge_accounts` in migration 025, which checks the role and
+ * the visibility of both records itself — it has to, because it runs SECURITY
+ * DEFINER in order to move the activities, which no policy lets a manager touch.
+ */
+export async function mergeAccounts(input: {
+  sourceId: string
+  targetId: string
+  reason?: string
+}): Promise<MergeResult> {
+  await requireUser()
+
+  const sourceId = uuidSchema.parse(input.sourceId)
+  const targetId = uuidSchema.parse(input.targetId)
+  const reason = z.string().trim().max(500).optional().parse(input.reason)
+
+  if (sourceId === targetId) {
+    throw new AppError('VALIDATION_FAILED', 'Choose two different customers.')
+  }
+
+  const supabase = await createSupabaseServerClient()
+  const { data, error } = await supabase
+    .rpc('merge_accounts', {
+      p_source_id: sourceId,
+      p_target_id: targetId,
+      p_reason: reason ?? undefined,
+    })
+    .single()
+
+  if (error) throw fromPostgrestError(error)
+
+  return {
+    contacts: data.contacts,
+    projects: data.projects,
+    opportunities: data.opportunities,
+    activities: data.activities,
+  }
+}
