@@ -330,3 +330,83 @@ real Android device.
 
 Services and RLS: **high and meaningful**. UI components: **only where logic exists**.
 The gate is behavioural, not numeric.
+
+
+---
+
+## Master Phase 3 — what was added and what it proves
+
+| Suite | Files | Assertions |
+|---|---|---|
+| Unit | `metrics`, `period`, `csv` | 96 |
+| Integration / RLS | `management-scope` | 75 |
+| E2E | `management`, extended `smoke` | 12 scenarios (11 auth-gated, skipped here — ADR-018) |
+
+**Totals after the phase: 378 unit, 314 integration, 27 E2E passing with 24 auth-gated skips.**
+
+### Unit — every metric definition
+
+`tests/unit/metrics.test.ts` covers each metric in §13.1 and each one Master Phase 3 adds, and the
+zero-denominator cases are the point rather than an afterthought:
+
+- **Win Rate is null, never 0%**, when nothing closed. A branch that closed nothing has *no* win
+  rate; `0%` says it lost everything it touched, which is a different and defamatory claim about a
+  real person's month.
+- **Quote-to-order conversion** is null when nothing reached quotation, and 0 when quotations went
+  out and none converted — those are different facts.
+- **A target of zero is not an absent target.** Zero is how a target is withdrawn (ADR-021) and
+  reports as met; absent reports an em dash.
+- **Nurture is excluded** from Pipeline Value and Weighted Pipeline. This is the exclusion people
+  forget.
+- **`HIGH_VALUE_AT_RISK` never appears alone.** A large enquiry being worked properly is a good
+  thing, not a risk — and that subset relationship is what lets migration 022 filter on the union of
+  the other four reasons without restating the rule.
+- **Thresholds are arguments.** One test runs the same row against two threshold sets and gets
+  different answers, which is what "no `TODO-BD` value is hard-coded" means in practice.
+
+`tests/unit/period.test.ts` pins the Asia/Kolkata boundaries. Every assertion ending
+`T18:30:00.000Z` is checking the same thing: midnight in Erode is 18:30 the previous day in UTC. It
+includes the case that actually bites — 2026-09-01 00:15 IST is 2026-08-31 18:45 UTC, and a
+UTC-based reading would file it under August.
+
+`tests/unit/csv.test.ts` covers the export boundary, including **spreadsheet formula injection**: a
+customer legitimately named `=cmd|'/c calc'!A1` becomes executable the moment a manager opens the
+file, and each dangerous prefix has its own case.
+
+### Integration — the scope rules
+
+`tests/integration/management-scope.test.ts` is the important file. Every assertion is made **as the
+restricted role** (§23).
+
+Two things make it falsifiable rather than merely green:
+
+1. **Branch A and branch B carry different values.** A test that only counted rows could pass while
+   leaking; these compare totals, so a leak changes the answer. The strongest case asserts the
+   branch-A manager's Won Value, the owner's Won Value, and that the first is strictly less than the
+   second.
+2. **The fixtures contain the awkward rows on purpose** — a deal won without ever being quoted, so
+   the conversion denominator is provably not "everything won"; a quotation with no recorded
+   qualification, so turnaround's excluded count is provably not zero; a salesperson with nothing at
+   all, so the team list is provably not "people with opportunities".
+
+`tests/integration/management-fixtures.ts` arranges that set inside the test's own rolled-back
+transaction rather than in `dev-fixtures.sql`, because the Phase 2 suites assert against that file's
+row counts and changing it would break tests about something else.
+
+**The suite caught three real defects during the phase**, each recorded in the phase summary: a
+`void IS NULL` gate that silently disabled every query, a `percentile_cont` type mismatch, and a
+blanket function grant that re-exposed trigger functions migration 018 had revoked.
+
+### E2E
+
+`tests/e2e/management.spec.ts` holds the ten scenarios of §20 plus two direct attacks on the export
+route. **They require Supabase Auth and are skipped here with a stated reason** (ADR-018) — the
+container images are blocked by the egress policy, so there is no auth server to issue a session.
+They are written against the real application and run with `E2E_SUPABASE_READY=1`.
+
+**This is not treated as coverage.** Every scope rule in them is also proved at the database level in
+`management-scope.test.ts`, which runs for real on every commit.
+
+What does run without auth: the extended smoke suite, which now covers `/team` and every `/reports`
+route, and asserts that `/api/export/opportunities` answers a signed-out caller **401 rather than a
+302 to an HTML login page** — the assertion that found ADR-024.

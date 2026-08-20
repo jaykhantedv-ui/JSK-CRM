@@ -1,5 +1,6 @@
 import {
-  Building2, CalendarCheck, LayoutDashboard, Settings, Store, Target, Users, UsersRound,
+  Building2, CalendarCheck, ChartColumn, LayoutDashboard, Settings, Store, Target, Upload,
+  Users, UsersRound,
 } from 'lucide-react'
 
 import type { SessionUser } from '@/types/domain'
@@ -31,7 +32,8 @@ export const SECONDARY_NAV: NavItem[] = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, visible: canViewTeamDashboard },
   { href: '/contacts', label: 'Contacts', icon: UsersRound },
   { href: '/team', label: 'Team', icon: Store, visible: canViewTeamDashboard },
-  { href: '/import', label: 'Import', icon: Store, visible: canImportCsv },
+  { href: '/reports', label: 'Reports', icon: ChartColumn, visible: canViewTeamDashboard },
+  { href: '/import', label: 'Import', icon: Upload, visible: canImportCsv },
   { href: '/settings', label: 'Settings', icon: Settings, visible: canEditSettings },
 ]
 

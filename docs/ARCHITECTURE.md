@@ -386,3 +386,57 @@ These do not change without approval recorded in `/docs/DECISIONS.md` (§17.1, `
 14. **Three denormalised columns are maintained by triggers, not by services** (ADR-020):
     `stage_changed_at`, both `last_activity_at` columns, and the `won → accounts.status` promotion.
     Writing them from application code again is a defect.
+
+
+---
+
+## Master Phase 3 — the management layer
+
+**Fourteen tables.** The spec's eleven, plus `outlets` and `user_outlets` (ADR-016), plus
+`sales_targets` (ADR-021). Each addition beyond the eleven has an ADR recorded before its migration
+was written, and `tests/integration/service-contracts.test.ts` asserts the exact list.
+
+### Where a management number comes from
+
+```
+migration 022 RPC  ── aggregates in SQL, SECURITY INVOKER, RLS applies
+        │
+services/analytics.service.ts  ── one call per block, all issued together
+        │
+lib/metrics.ts  ── every ratio, share and classification, pure and unit-tested
+        │
+services/dashboard.service.ts  ── assembles; contains NO arithmetic
+        │
+app/(app)/dashboard | /team | /reports  ── renders; contains NO arithmetic
+```
+
+**A component that adds two numbers together has created a second definition of a metric**, and the
+two will disagree within a quarter. Win Rate, quote-to-order conversion, target achievement, share
+percentages and at-risk classification each exist exactly once, in `lib/metrics.ts`.
+
+### Three rules the layer holds to
+
+1. **Aggregate in SQL.** PostgREST cannot `GROUP BY`, and reducing rows in Node means an unbounded
+   transfer and — worse — silent truncation past the row cap. A dashboard that quietly
+   under-reports is worse than one that fails (ADR-022).
+2. **RLS is still the boundary.** The RPCs are SECURITY INVOKER. The `assertManagement()` checks in
+   the services are early, readable failures; `assert_management_access()` in the database is the
+   control, and it holds against a direct PostgREST call.
+3. **Filters narrow, never widen.** `?outlet=` and `?owner=` are passed straight to the RPCs. A
+   hand-typed id for another branch returns nothing, because RLS bounds what the query can see —
+   so the parameters need no validation of their own, and adding some would create a second gate
+   that could drift from the real one.
+
+### Charts
+
+Server-rendered inline SVG and CSS. No charting dependency and no client JavaScript for the trend
+line or the proportion bars (ADR-023). Recharts remains in the frozen stack and is the right answer
+for a genuinely interactive chart; these are not that.
+
+### CSV export
+
+One route handler, `/api/export/[dataset]`, which authenticates, validates, calls
+`export.service.ts` and maps errors. The service performs the `canExportCsv` check **before** any
+read, reads through the caller's own session so RLS applies, and refuses an export larger than
+`EXPORT_ROW_LIMIT` rather than truncating it. Money leaves as rupees and every cell is neutralised
+against spreadsheet formula injection, both in `lib/csv.ts`.

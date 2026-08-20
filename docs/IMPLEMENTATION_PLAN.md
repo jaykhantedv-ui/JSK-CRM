@@ -1347,3 +1347,99 @@ single action in the project.
 | Maintenance counters treated as tunable settings (ADR-014) | 3, 18 | Operational state, written only by the cron route, never editable at `/settings` |
 | Audit events blurred into activities (C-1) | 11 | Visually and semantically distinct in the timeline; §10.1 keeps them separate |
 | Export bypassing RLS scope (C-2) | 14, 20 | Export runs the same scoped query as the screen; ADMIN rejected server-side |
+
+
+---
+
+# As built — Master Phase 3, management intelligence, implemented 2026-08-20
+
+Master Phase 3 is the management and reporting layer. It covers §13.3, §13.4 and §16 of the
+specification, plus the reporting surfaces the Master Phase 3 brief adds beyond it.
+
+## Delivered
+
+| Item | Detail |
+|---|---|
+| Migration 021 | `sales_targets` — the fourteenth table, approved as **ADR-021** before it was written |
+| Migration 022 | Thirteen SECURITY INVOKER aggregate RPCs plus `assert_management_access()` and `scoped_outlet_ids()` (**ADR-022**) |
+| `lib/metrics.ts` | Every metric definition, once, pure and unit-tested |
+| `lib/period.ts` | Reporting periods resolved to Asia/Kolkata instants, end exclusive |
+| `lib/csv.ts` | CSV with rupee conversion and formula-injection neutralisation |
+| Four services | `analytics`, `team`, `target`, `export`; `dashboard.service.ts` extended with the two composite dashboards |
+| `/dashboard` | Rewritten — §13.3 for MANAGER, §13.4 for OWNER, chosen by role |
+| `/team`, `/team/:userId` | Workload and per-person detail |
+| `/reports` + eleven reports | Pipeline · won/lost · salespeople · lost reasons · site visits · conversion · at-risk · customers · projects · branches · targets |
+| `/api/export/[dataset]` | Eleven datasets, server-authorised, bounded |
+| Navigation | `/reports` added to the role-gated sidebar (it was missing) |
+
+## Verification
+
+| Check | Result |
+|---|---|
+| `npm run typecheck` | Clean |
+| `npm run lint` | Clean, zero warnings |
+| `npm run test` (unit) | **378 passed** (282 before, 96 added) |
+| `npm run test:integration` | **314 passed** (239 before, 75 added) |
+| `npm run test:e2e` | **27 passed, 24 skipped** — the skips need Supabase Auth (ADR-018) |
+| `npm run build` | Clean. Management screens 118 kB first load against a 103 kB shared baseline |
+| `npm run check:bundle` | No service-role key or reference in the client bundle |
+| Migrations from empty | Applied cleanly, repeatedly, with `FIXTURES=1 scripts/db.sh reset` |
+| "Revenue" in the UI | Absent. The only matches anywhere are `revenue taluks` — the Tamil Nadu administrative term — in two code comments |
+
+## Defects found and fixed during the phase
+
+Each was caught by a test or a smoke check rather than by inspection, which is the point of running
+them continuously.
+
+1. **The management gate silently disabled every query.** `assert_management_access()` returned
+   `void`, and the RPCs used it as `... and public.assert_management_access() is null`. In
+   PostgreSQL `void IS NULL` is **false**, so every WHERE clause was unsatisfiable and every report
+   returned zero rows for everybody. Found by a manual smoke query against the fixtures immediately
+   after the migration applied — the gate was never reached, so no test would have failed on
+   permissions. Fixed by making the gate an unconditional `perform` on the first line of a
+   `plpgsql` body, which is also the correct shape for a security control (ADR-022).
+
+2. **`percentile_cont` returns double precision, not numeric.** `management_quotation_turnaround`
+   declared `median_days numeric` and failed at call time with "structure of query does not match
+   function result type" — at call time, not creation time, so the migration applied cleanly and
+   the function was broken. Found by the integration suite. Fixed with an explicit cast.
+
+3. **A blanket function grant re-opened a privilege migration 018 had closed.** Migration 022 ended
+   with `grant execute on all functions in schema public to authenticated`, which re-granted EXECUTE
+   on the SECURITY DEFINER trigger functions 018 deliberately revoked. Caught by the Phase 2 contract
+   test `the trigger functions added in 018 are not callable by anybody directly`. Fixed by granting
+   function by function. Migration 021 carried the same mistake on `guard_target_scope()` and was
+   fixed with it.
+
+4. **The lost-reason drill-down filtered after pagination.** It paginated every lost enquiry and then
+   discarded rows that did not match the selected reason, giving half-empty pages and a page count
+   that counted records the user could not see. Fixed by adding `lostReason` as a first-class filter
+   on `listOpportunities`, alongside stage and category.
+
+5. **An unauthenticated API request was answered with a 200 HTML page.** The middleware redirected
+   `/api/export/…` to `/login`; a caller following the redirect received the login page as HTML with
+   status 200, which a download script would write into a `.csv` file. Found by the smoke assertion
+   "a signed-out visitor gets no data". Fixed: `/api/*` now answers **401 JSON** (ADR-024).
+
+## Deviations from the specification, with reasons
+
+| Deviation | Reason |
+|---|---|
+| A fourteenth table, `sales_targets` | §10 of the brief requires targets; the spec has no target concept. `system_settings` is world-readable to authenticated users by design and would have published the company target to every salesperson. **ADR-021** |
+| The §13.4 trend chart is inline SVG, not Recharts | Recharts is in the frozen stack and needs no approval; this records the decision not to use it for a twelve-point polyline that would otherwise ship a charting runtime to a phone. **ADR-023** |
+| `/reports/targets` is a new sub-route | §12.2 lists `/reports` for MANAGER/OWNER. Targets are management data, so `/settings` — which MANAGER cannot reach and ADMIN can — was the wrong home. Follows the C-4 pattern of explicit routes |
+| Export refuses above 1,000 rows rather than truncating | `max_rows` in `supabase/config.toml` is where PostgREST silently truncates. A partial export that looks complete is the failure mode worth refusing |
+
+## Open items for Master Phase 4
+
+- **`/api/cron/*` needs a middleware exemption.** Cron routes authenticate with a shared secret
+  rather than a session (§14.7), so the 401 added by ADR-024 will block them. They do not exist yet
+  — Phase 3 does not build cron (§22) — and the behaviour is unchanged from Phase 2, which
+  redirected them. Recorded so it is not met as a mystery.
+- **Hosted Supabase remains unverified** (ADR-018). Eleven E2E scenarios are written and skipped with
+  a stated reason; they run against a real project with `E2E_SUPABASE_READY=1`. Every scope rule in
+  them is separately proved at the database level.
+- **No performance benchmark against a large dataset.** The brief explicitly declines synthetic
+  20,000-opportunity infrastructure. The queries are aggregated in SQL, bounded and paginated, and
+  the dashboard issues one round trip per block concurrently; that is a design argument rather than
+  a measurement, and it is stated as one.

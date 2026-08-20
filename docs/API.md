@@ -279,3 +279,47 @@ as type declarations only. **Do not write fake adapters** (§16.4, `CLAUDE.md` �
   authoritative.** `accounts` now carries `account_reachable check (phone is not null or email is
   not null)` (**ADR-013**), matching `contacts.contact_reachable`, so the phone-or-email rule
   cannot be defeated by a service-layer bug or a faulty import validator.
+
+
+---
+
+## Master Phase 3 — management services and the export route
+
+### Services
+
+| Module | Responsibility |
+|---|---|
+| `lib/metrics.ts` | **Every metric definition, once.** Pure; no database, no session, no settings — thresholds arrive as arguments. |
+| `lib/period.ts` | A reporting period resolved once into two instants, at Asia/Kolkata. End is **exclusive**. |
+| `lib/csv.ts` | CSV serialisation. Money leaves as rupees; every cell is neutralised against formula injection. |
+| `services/analytics.service.ts` | One call per migration-022 RPC. Aggregation is already done in SQL. |
+| `services/team.service.ts` | `/team` and `/team/:userId`. Workload, never HR. |
+| `services/target.service.ts` | Sales targets. Zero is a withdrawal, absent is unmeasurable. |
+| `services/export.service.ts` | Eleven datasets, each the caller's current filtered view. |
+| `services/dashboard.service.ts` | `getManagerDashboard` / `getOwnerDashboard`. **Assembly only — no arithmetic.** |
+
+### `GET /api/export/[dataset]`
+
+The only route handler added by this phase. Four things and no more (CLAUDE.md §8): authenticate,
+validate the dataset name, call `buildExport`, map errors.
+
+**Datasets:** `opportunities`, `accounts`, `projects`, `team`, `at-risk`, `lost-reasons`,
+`site-visits`, `customer-sales`, `project-sales`, `outlets`, `pipeline`.
+
+**Query string:** whatever the screen the manager pressed Export on was showing — `period`,
+`from`/`to`, `outlet`, `owner`, plus that list's own filters. The file matches the screen because
+both run the same service with the same filters through the same session.
+
+| Status | When |
+|---|---|
+| 200 | `text/csv; charset=utf-8`, `Cache-Control: no-store, private` |
+| 400 | The result exceeds `EXPORT_ROW_LIMIT` (1000). **Refused, never truncated.** |
+| 401 | No session — from the middleware, as JSON rather than a redirect (ADR-024) |
+| 403 | SALESPERSON or ADMIN (§3.1, C-2) |
+| 404 | Unknown dataset name |
+
+The row limit is `max_rows` in `supabase/config.toml`, the point at which PostgREST truncates a
+response without saying so. A manager who exports 1,000 of 3,000 rows and totals them in a
+spreadsheet gets a wrong number with no indication anything is missing, so the export is refused
+with a message naming which filter to narrow. There is a second guard for the same failure: if the
+transport ever returns fewer rows than it counted, the export is refused rather than written short.

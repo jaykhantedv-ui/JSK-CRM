@@ -1138,6 +1138,176 @@ three columns are not written by application code; writing them there again woul
 
 ---
 
+### ADR-021 — Sales targets are a table, not a `system_settings` key
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** Master Phase 3, `/reports/targets`, `services/target.service.ts`, migration 021
+
+**Context.** Master Phase 3 §10 requires a monthly sales-target mechanism at company, outlet and
+salesperson level, and instructs that an existing settings structure be preferred over a new table.
+The specification has no target concept at all, so this is an addition to it recorded here rather
+than a reading of it (CLAUDE.md §2).
+
+`system_settings` was the obvious candidate: it is a key→jsonb store, OWNER/ADMIN already write it,
+and a nested `{ "2026-08": { company, outlets, users } }` document would have carried every scope
+with no schema change.
+
+**It cannot carry this, for one reason that is not fixable by nesting the data differently.**
+`system_settings_select` grants **every authenticated user read on every settings row**, on purpose:
+stage probabilities and the city list are needed to render almost any screen, and a per-key policy
+would mean a policy per key. A monthly sales target is management data. Storing it in
+`system_settings` would publish the company's target — and every salesperson's individual target —
+to every salesperson through a single PostgREST call. No UI gating changes that (CLAUDE.md §6), and
+Master Phase 3 §20 requires an integration test proving a salesperson cannot reach management data.
+That test would have failed, correctly.
+
+**Decision.** A fourteenth table, `public.sales_targets`, with its own RLS.
+
+- Columns: `period_month` (always a month start), `outlet_id` (null = company-wide),
+  `user_id` (null = the whole outlet), `target_paise`, `note`, audit columns.
+- `target_user_requires_outlet` — a person's target is always a target **at** an outlet, so the RLS
+  policy can read scope from `outlet_id` alone.
+- Three **partial** unique indexes, one per scope. A plain three-column unique constraint would not
+  work: `null` is distinct from `null` in a unique index, so unlimited duplicate company rows would
+  be legal.
+- RLS: `outlet_id is null` → OWNER only; otherwise `manages_outlet(outlet_id)`. SALESPERSON and
+  ADMIN match neither branch and see nothing.
+- **No DELETE policy.** The schema still holds exactly one, on `project_stakeholders` (ADR-004). A
+  target is withdrawn by setting it to **zero**, and `targetProgress()` reports a zero target as met
+  rather than as a 0% failure — "no target" and "a target of zero" are different facts and render
+  differently.
+- `guard_target_scope()`, a trigger mirroring `guard_record_scope()`: the UPDATE policy's WITH CHECK
+  only proves the caller manages the **destination** outlet, so without the trigger a manager of two
+  branches could re-point one branch's target at the other and quietly erase it from the first
+  branch's reporting.
+
+**Consequences.**
+- §4.1's "eleven tables, no more" now reads eleven + `outlets` + `user_outlets` (ADR-016) +
+  `sales_targets`. `tests/integration/service-contracts.test.ts` asserts the exact list, so a
+  fifteenth table fails the suite until an ADR justifies it. That test caught this addition, which
+  is the mechanism working.
+- Targets are **planning figures, not accounting records** (§2.2). No metric depends on one
+  existing; every screen renders an em dash without one.
+- Scales to five or ten outlets with no shape change: one row per scope per month.
+
+**Alternatives considered.** A `system_settings` key (rejected above — it leaks). A per-key policy on
+`system_settings` (turns a two-policy table into a policy-per-key table, and every future key becomes
+a security decision). Deriving targets from last year's actuals (invents a number the business did
+not set — CLAUDE.md §15).
+
+---
+
+### ADR-022 — Management metrics are aggregated in SQL by SECURITY INVOKER RPCs
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** Master Phase 3, migration 022, `services/analytics.service.ts`
+
+**Context.** PostgREST cannot `GROUP BY`. The Phase 2 pipeline tile therefore selected up to 5,000
+rows with `.limit(5000)` and reduced them in Node. That is acceptable for one tile on one screen and
+unacceptable for a management layer, for two reasons: the transfer grows with the pipeline, and a set
+larger than the limit is **silently truncated** — a dashboard that quietly under-reports is worse
+than one that fails.
+
+**Decision.** Thirteen aggregate functions in migration 022, every one **SECURITY INVOKER**, so RLS is
+evaluated exactly as it is for a table read. An RPC buys atomicity and aggregation, never authority
+(§16.3).
+
+Four rules the file holds to:
+
+1. **`plpgsql`, not `sql`.** The management gate must run whether or not the query matches a row.
+   Written as a WHERE predicate inside a `language sql` body it is subject to the planner: against a
+   caller who can see nothing, the scan yields nothing and the gate may never be evaluated — the
+   caller gets a polite empty report instead of a refusal. `perform` on the first line of a plpgsql
+   body is unconditional. **A security control must not depend on a planner decision.**
+2. **No threshold is written in the file.** Stall days, dormancy days, the high-value threshold and
+   the stage probabilities all arrive as parameters from the settings service (CLAUDE.md §3).
+3. **Period boundaries arrive as instants** computed by `lib/dates.ts` from Asia/Kolkata day
+   boundaries. Where SQL must bucket by month it does so explicitly at `Asia/Kolkata`; a bare
+   `date_trunc` would bucket in the session timezone — UTC on Supabase — and put the first five and a
+   half hours of every Indian month in the previous one (CLAUDE.md §10).
+4. **`p_limit` is capped at 1000**, which is `max_rows` in `supabase/config.toml`. PostgREST
+   truncates beyond that number without saying so, so a higher ceiling would be a promise the
+   transport cannot keep.
+
+**`assert_management_access()`** refuses SALESPERSON and ADMIN at the database boundary. Without it a
+salesperson calling `management_team_workload` through PostgREST would receive a one-row report of
+their own numbers — no other person's data, because RLS holds, but a team surface all the same, and
+Master Phase 3 §4 is explicit that team dashboards are not a salesperson surface.
+
+**`scoped_outlet_ids()`** answers "which branches may this caller compare". OWNER resolves to every
+**active** outlet at read time rather than to membership rows, so a branch opened tomorrow is in
+scope tomorrow (ADR-016).
+
+**Consequences.**
+- One round trip per dashboard block, issued concurrently. No N+1, no unbounded query, no silent
+  truncation.
+- Grants are made **function by function**. A blanket `grant execute on all functions in schema
+  public` re-exposed the SECURITY DEFINER trigger functions that migration 018 had deliberately
+  revoked; `tests/integration/service-contracts.test.ts` caught it, and the per-function grant is the
+  fix.
+- The at-risk predicate in SQL is the **union of the risk reasons**, not a second copy of them.
+  Naming which reasons apply is `classifyRisk()` in `lib/metrics.ts`, which is pure and unit-tested.
+  High-value-at-risk is a strict subset of overdue-or-stalled, so the SQL does not restate it —
+  a unit test asserts that reason never appears alone, which is what makes the two agree.
+
+**Alternatives considered.** Reducing rows in Node (silent truncation, unbounded transfer). Views
+(cannot take a period parameter). Materialised views (an extra thing to refresh, invisible staleness,
+and no measured performance problem to justify it). A separate analytics warehouse (§16 forbids it).
+
+---
+
+### ADR-023 — The management trend and proportion visuals are inline SVG, not Recharts
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** `features/management/charts.tsx`
+
+**Context.** §13.4 specifies "Won Value by month, last 12 months — one line chart", and §13.3 Panel B
+shows workload as bars. Recharts is in the frozen stack (§17.1), so using it would need no approval —
+this entry records the decision **not** to, which is the one that deserves an explanation.
+
+**Decision.** Both visuals are server-rendered inline SVG and CSS, with no charting dependency and no
+client JavaScript.
+
+**Reasoning.** These are a bar whose width is a percentage and a twelve-point polyline. Recharts would
+make both Client Components, ship a charting runtime to a phone in a showroom, and replace nine lines
+of SVG with a dependency. §17.1's own instruction is to prefer the platform. The management screens
+come in at 118 kB first-load as a result, against a 103 kB shared baseline.
+
+**Consequences.**
+- Every visual is also stated in text beside itself, so the figures survive greyscale, sunlight and a
+  screen reader (§12.1) — and the screens degrade to something perfectly readable if the SVG does not
+  render.
+- The trend line's y-axis starts at zero, deliberately: a line scaled to its own minimum turns a 3%
+  variation into a cliff.
+- **This is not a rejection of Recharts.** A genuinely interactive chart — tooltips, zoom, a brush —
+  would be a different decision and Recharts would be the right answer to it. Adding it later needs no
+  new approval; it is already in the frozen stack.
+
+---
+
+### ADR-024 — An unauthenticated API request is answered with 401, not a redirect
+
+**Status:** Accepted · **Date:** 2026-08-20 · **Decided by:** Project Owner
+**Affects:** `src/middleware.ts`
+
+**Context.** The middleware redirected every unauthenticated request to `/login`. For a page that is
+right. For `/api/export/opportunities` it is not: the caller follows the redirect, receives the login
+page as **HTML with status 200**, and a script downloading a CSV writes that HTML into a `.csv` file
+believing it has data. The Phase 3 smoke test asserted "a signed-out visitor gets no data" and failed
+on the 200, which is how this was found.
+
+**Decision.** A request to `/api/*` without a session is answered `401` with a JSON body. Page routes
+keep the redirect, including the `?next=` destination that resumes an interrupted task.
+
+**Consequences.** A refusal is legible from the status line. The rule is in the middleware, so every
+route handler added later inherits it.
+
+**Open for Master Phase 4.** `/api/cron/*` is authenticated by a shared secret rather than a session
+(§14.7), so those routes will need an exemption when they are built. They do not exist yet — Phase 3
+does not build cron (§22) — and the behaviour is unchanged from Phase 2, which redirected them.
+Recorded here so it is not discovered as a mystery.
+
+
 ## Master Phase 2 corrections
 
 Three defects were found and fixed while building the Core CRM. Recorded here because each

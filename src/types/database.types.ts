@@ -956,6 +956,74 @@ export type Database = {
           },
         ]
       }
+      sales_targets: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          id: string
+          note: string | null
+          outlet_id: string | null
+          period_month: string
+          target_paise: number
+          updated_at: string
+          updated_by: string | null
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          note?: string | null
+          outlet_id?: string | null
+          period_month: string
+          target_paise: number
+          updated_at?: string
+          updated_by?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          note?: string | null
+          outlet_id?: string | null
+          period_month?: string
+          target_paise?: number
+          updated_at?: string
+          updated_by?: string | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sales_targets_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sales_targets_outlet_id_fkey"
+            columns: ["outlet_id"]
+            isOneToOne: false
+            referencedRelation: "outlets"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sales_targets_updated_by_fkey"
+            columns: ["updated_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sales_targets_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       system_settings: {
         Row: {
           description: string | null
@@ -1280,6 +1348,7 @@ export type Database = {
       }
     }
     Functions: {
+      assert_management_access: { Args: never; Returns: undefined }
       bulk_reassign: {
         Args: { p_from_user: string; p_reason: string; p_to_user: string }
         Returns: number
@@ -1434,6 +1503,265 @@ export type Database = {
           opportunity_id: string
         }[]
       }
+      management_at_risk: {
+        Args: {
+          p_dormancy_days: number
+          p_limit?: number
+          p_offset?: number
+          p_outlet?: string
+          p_owner?: string
+          p_stall_days: Json
+        }
+        Returns: {
+          account_id: string
+          account_name: string
+          days_in_stage: number
+          days_since_activity: number
+          estimated_value: number
+          id: string
+          is_missing_next_action: boolean
+          is_overdue: boolean
+          last_activity_at: string
+          next_action: Database["public"]["Enums"]["next_action_type"]
+          next_action_date: string
+          outlet_id: string
+          outlet_name: string
+          owner_id: string
+          owner_name: string
+          project_id: string
+          project_name: string
+          stage: Database["public"]["Enums"]["opportunity_stage"]
+          stage_stall_days: number
+          title: string
+          total_count: number
+        }[]
+      }
+      management_customer_sales: {
+        Args: {
+          p_from: string
+          p_limit?: number
+          p_offset?: number
+          p_outlet?: string
+          p_owner?: string
+          p_to: string
+        }
+        Returns: {
+          account_id: string
+          account_name: string
+          account_type: Database["public"]["Enums"]["account_type"]
+          last_activity_at: string
+          lost_count: number
+          open_count: number
+          outlet_id: string
+          pipeline_value_paise: number
+          total_count: number
+          won_count: number
+          won_value_paise: number
+        }[]
+      }
+      management_exceptions: {
+        Args: {
+          p_dormancy_days: number
+          p_high_value: number
+          p_outlet?: string
+          p_owner?: string
+          p_sla_cutoff: string
+          p_stall_days: Json
+        }
+        Returns: {
+          active_total: number
+          dormant: number
+          high_value_at_risk: number
+          missing_next_action: number
+          overdue: number
+          overdue_value_paise: number
+          quotation_expired: number
+          sla_breach: number
+          stalled: number
+          unassigned: number
+        }[]
+      }
+      management_lost_reasons: {
+        Args: {
+          p_from: string
+          p_outlet?: string
+          p_owner?: string
+          p_to: string
+        }
+        Returns: {
+          lost_count: number
+          lost_reason: Database["public"]["Enums"]["lost_reason"]
+          lost_value_paise: number
+        }[]
+      }
+      management_outlet_comparison: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          active_count: number
+          lost_count: number
+          new_enquiry_count: number
+          outlet_code: string
+          outlet_id: string
+          outlet_name: string
+          overdue_count: number
+          pipeline_value_paise: number
+          quoted_reached_count: number
+          quoted_value_paise: number
+          quoted_won_count: number
+          site_visit_count: number
+          won_count: number
+          won_value_paise: number
+        }[]
+      }
+      management_period_summary: {
+        Args: {
+          p_from: string
+          p_outlet?: string
+          p_owner?: string
+          p_to: string
+        }
+        Returns: {
+          lost_count: number
+          lost_value_paise: number
+          new_enquiry_count: number
+          quoted_value_paise: number
+          won_count: number
+          won_value_paise: number
+        }[]
+      }
+      management_pipeline_by_stage: {
+        Args: { p_outlet?: string; p_owner?: string; p_probabilities: Json }
+        Returns: {
+          counts_in_pipeline: boolean
+          opportunity_count: number
+          stage: Database["public"]["Enums"]["opportunity_stage"]
+          value_paise: number
+          weighted_paise: number
+        }[]
+      }
+      management_project_sales: {
+        Args: {
+          p_from: string
+          p_limit?: number
+          p_offset?: number
+          p_outlet?: string
+          p_owner?: string
+          p_to: string
+        }
+        Returns: {
+          account_id: string
+          account_name: string
+          lost_count: number
+          open_count: number
+          opportunity_count: number
+          outlet_id: string
+          pipeline_value_paise: number
+          project_id: string
+          project_name: string
+          project_status: Database["public"]["Enums"]["project_status"]
+          project_type: Database["public"]["Enums"]["project_type"]
+          total_count: number
+          won_count: number
+          won_value_paise: number
+        }[]
+      }
+      management_quotation_turnaround: {
+        Args: {
+          p_from: string
+          p_outlet?: string
+          p_owner?: string
+          p_to: string
+        }
+        Returns: {
+          average_days: number
+          excluded_count: number
+          measured_count: number
+          median_days: number
+          slowest_days: number
+          within_two_days: number
+        }[]
+      }
+      management_quote_conversion: {
+        Args: {
+          p_from: string
+          p_outlet?: string
+          p_owner?: string
+          p_to: string
+        }
+        Returns: {
+          lost_after_quote_count: number
+          never_quoted_won_count: number
+          reached_quoted_count: number
+          won_after_quote_count: number
+          won_after_quote_value_paise: number
+        }[]
+      }
+      management_site_visits: {
+        Args: {
+          p_from: string
+          p_limit?: number
+          p_offset?: number
+          p_outlet?: string
+          p_owner?: string
+          p_project?: string
+          p_to: string
+        }
+        Returns: {
+          account_id: string
+          account_name: string
+          id: string
+          location_note: string
+          measurements: string
+          occurred_at: string
+          opportunity_id: string
+          outcome: Database["public"]["Enums"]["activity_outcome"]
+          outlet_id: string
+          outlet_name: string
+          performed_by: string
+          performed_by_name: string
+          project_id: string
+          project_name: string
+          purpose: Database["public"]["Enums"]["activity_purpose"]
+          summary: string
+          total_count: number
+        }[]
+      }
+      management_team_workload: {
+        Args: {
+          p_from: string
+          p_outlet?: string
+          p_stall_days: Json
+          p_to: string
+        }
+        Returns: {
+          active_count: number
+          activity_count: number
+          due_today_count: number
+          full_name: string
+          is_active: boolean
+          last_activity_at: string
+          lost_count: number
+          missing_next_action: number
+          overdue_count: number
+          pipeline_value_paise: number
+          quoted_reached_count: number
+          quoted_won_count: number
+          role: Database["public"]["Enums"]["user_role"]
+          site_visit_count: number
+          stalled_count: number
+          user_id: string
+          won_count: number
+          won_value_paise: number
+        }[]
+      }
+      management_won_by_month: {
+        Args: { p_months: number; p_outlet?: string }
+        Returns: {
+          month_start: string
+          won_count: number
+          won_value_paise: number
+        }[]
+      }
       manages_outlet: { Args: { p_outlet: string }; Returns: boolean }
       manages_user: { Args: { p_user: string }; Returns: boolean }
       normalize_phone: { Args: { raw: string }; Returns: string }
@@ -1490,6 +1818,7 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      scoped_outlet_ids: { Args: never; Returns: string[] }
       search_crm: {
         Args: { p_limit?: number; p_query: string }
         Returns: {

@@ -391,3 +391,59 @@ throttling (C-5), Storage policies, and PostgREST request handling. Hosted verif
 attempted on 2026-08-19 with official tooling and is **blocked** — the Supabase control plane and
 data plane are both denied by the environment's egress policy and no account is attached. See
 `/docs/DEPLOYMENT.md` §0.
+
+
+---
+
+## Master Phase 3 — the management surface
+
+### Who reaches what
+
+| Surface | SALESPERSON | MANAGER | OWNER | ADMIN |
+|---|:---:|:---:|:---:|:---:|
+| `/dashboard` | ✘ → `/today` | ✔ their branches | ✔ company-wide | ✘ → `/settings` |
+| `/team`, `/team/:userId` | ✘ | ✔ their branches | ✔ | ✘ |
+| `/reports/*` | ✘ | ✔ their branches | ✔ | ✘ |
+| `/reports/targets` — branch figure | ✘ | ✔ their branches | ✔ | ✘ |
+| `/reports/targets` — company figure | ✘ | ✘ | ✔ | ✘ |
+| `/api/export/*` | ✘ 403 | ✔ | ✔ | ✘ 403 |
+| Read `sales_targets` | ✘ | ✔ their branches | ✔ | ✘ |
+
+**ADMIN is absent from every row**, which is ADR-017 applied without exception: system
+administration is not sales management, and reaching `/settings` confers no dashboard.
+
+### Where each refusal actually lives
+
+A redirect is not a control and a hidden menu item is not a control. Each rule above holds at the
+database or at the server:
+
+| Rule | Enforced by | Proved by |
+|---|---|---|
+| Management reporting is MANAGER/OWNER | `assert_management_access()`, called by `perform` on the first line of all thirteen analytics RPCs | `management-scope.test.ts` — 26 assertions, one per RPC per denied role |
+| A manager sees only their branches | RLS on `opportunities`/`accounts`/`activities`, plus `scoped_outlet_ids()` | Branch A and branch B carry **different values**, so a leak changes the total rather than only the row count |
+| An owner sees every branch | `user_role() = 'OWNER'` in `scoped_outlet_ids()`, **by role, not membership** | The OWNER fixture holds no `user_outlets` rows at all and still sees all three branches |
+| Targets are management data | RLS on `sales_targets` | A salesperson sees zero rows, including their own target |
+| The company target is the owner's | `outlet_id is null → is_owner()` | A manager's insert is rejected `42501` |
+| A target cannot be moved out of a branch | `guard_target_scope()` trigger | The WITH CHECK alone only proves the destination |
+| Export is MANAGER/OWNER | `canExportCsv()` in `export.service.ts`, before any read | The route is attacked directly, not through the button |
+| An unauthenticated API call | middleware returns **401 JSON**, not a redirect (ADR-024) | Smoke suite asserts the status, which runs without Supabase Auth |
+
+### Why the analytics gate exists at all
+
+RLS alone would not have been enough. A salesperson calling `management_team_workload` through
+PostgREST would have received a **one-row report of their own numbers** — no other person's data,
+because the policies hold, but a team surface all the same. Master Phase 3 §4 is explicit that team
+dashboards are not a salesperson surface, so the refusal belongs at the database boundary.
+
+The gate is a `perform` on the first line of a `plpgsql` body rather than a WHERE predicate,
+deliberately. As a predicate in a `language sql` body it would be subject to the planner: for a
+caller who can see nothing, the scan yields nothing and the gate may never be evaluated — the caller
+would get a polite empty report instead of a refusal. **A security control must not depend on a
+planner decision.**
+
+### What is proved today
+
+`tests/integration/` holds **314 passing assertions**, 75 of them added by Master Phase 3 and all
+made **as the restricted role** (§23 — verifying a permission as OWNER proves nothing). Still
+unproved, and honestly so (ADR-018): Supabase Auth, Storage policies and PostgREST request handling,
+which need a real Supabase project.

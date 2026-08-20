@@ -84,7 +84,21 @@ Full instructions, including the traps worth knowing before writing code, are in
 
 ## Status
 
-**Master Phase 1 — platform foundation — is built and verified.** Schema, authentication, the
-outlet model, RLS, the shared service layer and generated types exist and are tested. The CRM
-feature screens do not: an unbuilt screen renders a plain "not built yet" panel rather than a
-mock, because a phase demoed on fixtures is a phase misreported.
+**Master Phases 1–3 are built and verified**: the platform foundation, the Core CRM, and the
+management intelligence layer.
+
+| Phase | Scope | State |
+|---|---|---|
+| 1 — Platform foundation | Schema, auth, outlet model, RLS, service layer, generated types | Built and verified |
+| 2 — Core CRM | Customers, contacts, projects, opportunities, activities, next actions, `/today`, search, duplicate detection | Built and verified |
+| 3 — Management intelligence | Manager and owner dashboards, `/team`, eleven reports, sales targets, CSV export | Built and verified |
+| 4–5 | Import wizard, archive/restore, merge, file upload, cron, notifications, deployment | Not built |
+
+An unbuilt screen renders a plain "not built yet" panel rather than a mock, because a phase demoed
+on fixtures is a phase misreported.
+
+**378 unit tests · 314 integration and RLS tests · 27 E2E tests passing**, with 24 E2E scenarios
+written and skipped for a stated reason: they need Supabase Auth, which this environment cannot run
+(**ADR-018**). Every authorization rule in those scenarios is separately proved against a real
+PostgreSQL server in `tests/integration/`. **Hosted Supabase — Auth, Storage and PostgREST — remains
+unverified**, and is not claimed otherwise.

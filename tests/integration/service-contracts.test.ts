@@ -234,18 +234,25 @@ describe('grants the service calls depend on', () => {
   })
 })
 
-describe('the schema is still eleven business tables plus outlet scope (§4.1)', () => {
-  it('has not grown a twelfth business table', async () => {
+describe('the schema is still the approved table set (§4.1)', () => {
+  it('has not grown an unapproved table', async () => {
     const { rows } = await db.query(
       `select table_name from information_schema.tables
         where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name`,
     )
     const tables = rows.map((row: { table_name: string }) => row.table_name)
-    // The eleven of §4.1, plus `outlets` and `user_outlets` from ADR-016.
+    // The eleven of §4.1, plus `outlets` and `user_outlets` from ADR-016, plus
+    // `sales_targets` from ADR-021.
+    //
+    // **Each addition beyond the eleven required approval recorded in
+    // /docs/DECISIONS.md BEFORE its migration was written** (CLAUDE.md §4). This
+    // list is the enforcement of that rule: a table that appears here without an
+    // ADR behind it fails the build, which is exactly what happened when
+    // `sales_targets` was added and is why ADR-021 exists.
     expect(tables).toEqual([
       'accounts', 'activities', 'contacts', 'import_batches', 'import_rows', 'opportunities',
-      'opportunity_events', 'outlets', 'project_stakeholders', 'projects', 'system_settings',
-      'user_outlets', 'users',
+      'opportunity_events', 'outlets', 'project_stakeholders', 'projects', 'sales_targets',
+      'system_settings', 'user_outlets', 'users',
     ])
   })
 

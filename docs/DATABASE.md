@@ -532,3 +532,74 @@ For the record:
 | **H-11 sub** | **`accounts.status` is not changed** when a won opportunity is reopened — the account may hold other WON opportunities. Service-layer, no schema impact. |
 | **§14.6 state** | `maintenance_consecutive_failures` + `maintenance_last_failure_at` in `system_settings` (ADR-014). |
 | **TODO-BD-06 seed** | The ten revenue taluks above; Chennimalai corrected to a block/firka under Perundurai. |
+
+
+---
+
+## Master Phase 3 — management intelligence (migrations 021, 022)
+
+### 021 — `sales_targets`, the fourteenth table
+
+Approved as **ADR-021** before the migration was written (CLAUDE.md §4). The reason it could not be
+a `system_settings` key is not stylistic: `system_settings_select` grants every authenticated user
+read on every row, so a target stored there would publish the company's figure — and every
+salesperson's individual figure — to every salesperson through one PostgREST call.
+
+| Column | Notes |
+|---|---|
+| `period_month` | `date`, always a month start. `target_period_is_month_start` enforces it. |
+| `outlet_id` | Null = company-wide. |
+| `user_id` | Null = the whole outlet. `target_user_requires_outlet` forbids a person without a branch. |
+| `target_paise` | `bigint`, `>= 0`. **Zero is how a target is withdrawn** — there is no DELETE. |
+
+Three **partial** unique indexes, one per scope. A plain three-column unique constraint would not
+work: `null` is distinct from `null` in a unique index, so duplicate company rows would be legal.
+
+RLS reads scope straight off `outlet_id` — `null` → `is_owner()`, otherwise
+`manages_outlet(outlet_id)`. SALESPERSON and ADMIN match neither branch. `guard_target_scope()`
+mirrors `guard_record_scope()`: the UPDATE policy's WITH CHECK only proves the caller manages the
+**destination** branch, so without the trigger a manager of two branches could re-point one
+branch's target at the other and erase it from the first branch's reporting.
+
+**No DELETE policy.** The schema still holds exactly one, on `project_stakeholders` (ADR-004), and
+`tests/integration/service-contracts.test.ts` asserts that.
+
+### 022 — the management analytics functions
+
+Thirteen aggregate functions plus two helpers, all **SECURITY INVOKER** so RLS is evaluated exactly
+as it is for a table read (ADR-022).
+
+| Function | Answers |
+|---|---|
+| `assert_management_access()` | Refuses SALESPERSON and ADMIN at the database boundary. |
+| `scoped_outlet_ids()` | Which branches may this caller compare. OWNER → every **active** branch, by role. |
+| `management_pipeline_by_stage` | Count, value and weighting per stage. |
+| `management_exceptions` | The eight counts of §13.3 Panel A, in one row. |
+| `management_period_summary` | Won, lost, new enquiries, quoted value for a period. |
+| `management_team_workload` | One row per salesperson in scope, including those with nothing. |
+| `management_outlet_comparison` | One row per branch in scope. |
+| `management_lost_reasons` | Count and value by reason. |
+| `management_quote_conversion` | Reached-quoted, won-after-quote, and wins that never were quoted. |
+| `management_quotation_turnaround` | Qualified→quoted days, **plus what it could not measure**. |
+| `management_won_by_month` | The trend series, bucketed at Asia/Kolkata, empty months as zeros. |
+| `management_at_risk` | The at-risk set, paginated, with the raw signals for `classifyRisk()`. |
+| `management_customer_sales` / `management_project_sales` | Rollups per customer and per project. |
+| `management_site_visits` | `activities` where `type = 'SITE_VISIT'`. **No site-visits table exists.** |
+
+Four properties worth knowing before editing the file:
+
+1. **Every body is `plpgsql`, not `sql`.** The gate has to run whether or not the query matches a
+   row. As a WHERE predicate in a `language sql` body it is subject to the planner — against a
+   caller who can see nothing, the scan yields nothing and the gate may never be evaluated.
+   `perform` on the first line is unconditional.
+2. **No threshold is written in the file.** Stall days, dormancy days, the high-value threshold and
+   the stage probabilities all arrive as parameters from `services/settings.service.ts`.
+3. **Period boundaries arrive as instants** from `lib/dates.ts`. Where SQL buckets by month it does
+   so explicitly at `Asia/Kolkata`.
+4. **`p_limit` is capped at 1000**, which is `max_rows` in `supabase/config.toml`. PostgREST
+   truncates beyond that silently, so a higher ceiling would be a lie. `EXPORT_ROW_LIMIT` is the
+   same number for the same reason; if `max_rows` changes, both change with it.
+
+Grants are made **function by function**. A blanket `grant execute on all functions in schema
+public` re-exposed the SECURITY DEFINER trigger functions migration 018 had deliberately revoked —
+`tests/integration/service-contracts.test.ts` caught it.

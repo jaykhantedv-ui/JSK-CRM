@@ -77,6 +77,8 @@ export type OpportunityFilters = {
   q?: string | null
   stage?: OpportunityStage | null
   category?: ProductCategory | null
+  /** Narrows a lost list to one reason — the §14 lost-reason drill-down. */
+  lostReason?: LostReason | null
   ownerId?: string | null
   outletId?: string | null
   mineOnly?: boolean
@@ -95,6 +97,7 @@ export function parseOpportunityFilters(raw: Record<string, string | undefined>)
     q: raw.q?.trim() || null,
     stage: asEnum(raw.stage, STAGE_VALUES),
     category: asEnum(raw.category, CATEGORIES),
+    lostReason: asEnum(raw.reason, LOST_REASONS),
     ownerId: raw.owner?.trim() || null,
     outletId: raw.outlet?.trim() || null,
     mineOnly: raw.mine === '1',
@@ -131,6 +134,7 @@ export async function listOpportunities(
   if (filters.outletId) query = query.eq('outlet_id', filters.outletId)
   if (filters.stage) query = query.eq('stage', filters.stage)
   if (filters.category) query = query.eq('category', filters.category)
+  if (filters.lostReason) query = query.eq('lost_reason', filters.lostReason)
   if (filters.activeOnly) query = query.eq('is_active', true)
   if (filters.unassignedOnly) query = query.is('owner_id', null)
   if (filters.overdueOnly) query = query.eq('is_overdue', true)

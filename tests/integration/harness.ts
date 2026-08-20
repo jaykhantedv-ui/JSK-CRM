@@ -171,3 +171,57 @@ export async function updateRowCount(db: Db, sql: string, params: unknown[] = []
   const result = await db.query(sql, params)
   return result.rowCount ?? 0
 }
+
+/**
+ * Impersonate a different user inside an already-open transaction.
+ *
+ * `set local role` and the claims GUC are both transaction-scoped, so a scenario
+ * that arranges data as one person and asserts as another can do both inside the
+ * single transaction it will roll back. `reset role` first, because a session
+ * already switched to `authenticated` cannot switch again — it has no membership
+ * in any other role.
+ */
+export async function becomeUser(db: Db, userId: string | null): Promise<void> {
+  await db.query('reset role')
+  if (userId === null) {
+    await db.query('select set_config($1, $2, true)', ['request.jwt.claims', ''])
+    await db.query('set local role anon')
+    return
+  }
+  await db.query('select set_config($1, $2, true)', [
+    'request.jwt.claims',
+    JSON.stringify({ sub: userId, role: 'authenticated' }),
+  ])
+  await db.query('set local role authenticated')
+}
+
+/**
+ * Arrange fixtures as the database owner, then assert as a given user — in one
+ * transaction that is rolled back.
+ *
+ * The management suites need this shape because the data under test is other
+ * people's: won deals owned by several salespeople across several branches,
+ * which a manager then reads. Arranging that through each owner's own session
+ * would test the write policies all over again rather than the reporting rule
+ * actually under examination.
+ *
+ * **`arrange` runs as the database owner and must never assert anything.** The
+ * owner bypasses row-level security, so an assertion made there proves nothing
+ * (§23).
+ */
+export async function scenario<T>(
+  db: Db,
+  arrange: (db: Db) => Promise<void>,
+  userId: string | null,
+  assert: (db: Db) => Promise<T>,
+): Promise<T> {
+  await db.query('begin')
+  try {
+    await arrange(db)
+    await becomeUser(db, userId)
+    return await assert(db)
+  } finally {
+    await db.query('rollback')
+    await db.query('reset role')
+  }
+}

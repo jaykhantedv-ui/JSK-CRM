@@ -23,6 +23,16 @@ export async function middleware(request: NextRequest) {
 
   const isPublic = PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))
 
+  // An API route answers with a STATUS, never with the login page.
+  //
+  // Redirecting `/api/export/opportunities` to `/login` hands the caller a 200
+  // and a body of HTML — which a script downloading a CSV will happily write to
+  // a `.csv` file, and which makes "was I refused?" impossible to answer from
+  // the status line. 401 says the one thing that is true.
+  if (!userId && !isPublic && pathname.startsWith('/api/')) {
+    return NextResponse.json({ error: 'Sign in to continue.' }, { status: 401 })
+  }
+
   if (!userId && !isPublic) {
     const redirect = request.nextUrl.clone()
     redirect.pathname = '/login'
