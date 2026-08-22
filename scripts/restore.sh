@@ -73,11 +73,8 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
 # A real Supabase project already has all of this, so these statements are no-ops
 # there. On a bare PostgreSQL server they are what makes the archive restorable
 # without Supabase at all, which is the entire point of holding it (§17).
-echo "--- preparing target (extensions)"
-psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -q \
-  -c 'create schema if not exists extensions;' \
-  -c 'create extension if not exists pg_trgm with schema extensions;' \
-  -c 'create extension if not exists pgcrypto with schema extensions;'
+echo "--- preparing target (platform roles, schemas, extensions)"
+psql "$RESTORE_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$(dirname "$0")/restore-prepare.sql"
 
 echo "--- restoring into the target"
 # --clean --if-exists so a re-run is repeatable rather than a pile of conflicts.

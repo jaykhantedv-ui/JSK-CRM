@@ -87,6 +87,53 @@ begin
   raise notice 'security: row-level security enabled on every public table';
 end $$;
 
+-- RLS ENABLED IS NOT RLS ENFORCED. The policies have to come back too.
+--
+-- Every policy names a grantee — `to authenticated`, `to anon`, `to service_role` —
+-- and pg_dump does not dump roles. Restoring onto a server that has never run
+-- Supabase failed 45 `CREATE POLICY` statements with `role "authenticated" does not
+-- exist` while every other check on this page passed: 14 tables, correct row
+-- counts, RLS flag on, and NOT ONE POLICY. A table with RLS enabled and no policy
+-- denies everything, so that restore was not a usable database — it just looked
+-- like one. scripts/restore-prepare.sql creates the roles; this counts the result.
+do $$
+declare
+  bare text;
+  total bigint;
+begin
+  select string_agg(c.relname, ', '), count(*) filter (where true) into bare, total
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity
+    and not exists (select 1 from pg_policy p where p.polrelid = c.oid);
+
+  if bare is not null then
+    raise exception
+      'RLS is on but NO POLICY was restored for: % — the policies did not survive', bare;
+  end if;
+
+  select count(*) into total from pg_policy p
+  join pg_class c on c.oid = p.polrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public';
+  raise notice 'security: % policies restored, every RLS table has at least one', total;
+end $$;
+
+-- The platform schemas the archive depends on. Their absence is what produces
+-- `schema "storage" does not exist` on a target that was not prepared.
+do $$
+declare missing text;
+begin
+  select string_agg(s, ', ') into missing
+  from unnest(array['public','auth','storage','extensions']) s
+  where not exists (select 1 from pg_namespace where nspname = s);
+
+  if missing is not null then
+    raise exception 'platform schemas missing after restore: %', missing;
+  end if;
+  raise notice 'platform: public, auth, storage and extensions all present';
+end $$;
+
 -- Search and duplicate detection actually run.
 --
 -- This check exists because the first restore drill passed every other check on

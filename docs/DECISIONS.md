@@ -1891,6 +1891,64 @@ it. It also proves the alignment still produces SCRAM verifiers on a server whos
 - **Keep the loopback check as a fast pre-flight.** Rejected: a check that cannot
   fail is worse than no check, because it is read as evidence.
 
+### ADR-037 — The restore target is prepared, and the drill is measured against the source
+
+**Status:** Accepted
+**Date:** 2026-08-22   **Decided by:** Engineering
+
+**Context.** The office server's first real restore drill failed: `pg_restore exit=1`
+with `schema "storage" does not exist`, and verification reported all fourteen
+business tables missing. Reproducing it exposed a larger problem than the one error
+message.
+
+The archive is a schema-filtered `pg_dump`, and `pg_dump` never dumps roles. Three
+classes of object the CRM depends on are therefore absent from every archive:
+extensions (`pg_trgm`, `pgcrypto`), the platform schemas (`auth`, `storage`), and
+the platform roles. Restoring onto a bare PostgreSQL server — the disaster-recovery
+case this backup exists for — measured **45 errors, all `role "authenticated" does
+not exist`**. Fourteen tables restored. Every row count matched. RLS read as enabled.
+**Forty-two policies were lost.** A table with RLS on and no policy denies
+everything, so that restore reported success and was not a usable database.
+
+The drill could not see it: it checked the RLS *flag*, never the policies, and it
+compared the restored database against expectations rather than against the source.
+
+**Decision.**
+
+- `scripts/restore-prepare.sql` creates everything the archive does not carry:
+  the platform roles (NOLOGIN, no passwords — they exist so policies can name
+  them), the `auth`, `storage` and `extensions` schemas, and the two extensions. It
+  also fails early, by name, if the restoring role has no CREATE privilege on the
+  database, which is the other way every schema quietly fails to appear.
+- `scripts/verify-restore.sql` now counts **policies**, not just the RLS flag, and
+  asserts the platform schemas exist.
+- `scripts/test-restore-drill.sh` runs three full backup→restore→verify cycles
+  against a **bare** cluster and compares tables, policies, foreign keys, indexes
+  and every table's row count **against the source**. It asserts `pg_restore`
+  reports zero diagnostics rather than tolerating them.
+- `scripts/backup.sh` reads the archive's table of contents and refuses to publish
+  one missing any business table. `pg_dump` can fail part way and leave a listable
+  file: a role that is neither a table's owner nor exempt from row-level security
+  cannot COPY it (`query would be affected by row-level security policy`), and
+  exits 1 with the file already written. On a backup, check the artifact.
+
+**Consequences.** Preparation is not error suppression, and nothing is passed
+`--exit-on-error=false`: the archive still defines everything it defines, and
+`--clean --if-exists` drops and recreates it, so a complete archive is unaffected by
+the preparation. What changes is that an *incomplete* archive, or a target that has
+never run Supabase, now restores correctly instead of producing a database that
+looks right. The backup format and the encryption are untouched.
+
+**Alternatives considered.**
+- **Dump the whole database instead of three schemas.** Rejected: it drags in the
+  platform's own catalogs and makes the archive dependent on the image version,
+  which is the opposite of "restorable without Supabase".
+- **Tolerate the policy errors and re-run the migrations after restoring.** Rejected:
+  the migrations are not idempotent against restored data, and a recovery that needs
+  a second, different tool is a recovery that fails at 2 a.m.
+- **Create the roles inside `verify-restore.sql`.** Rejected: verification must
+  observe, never repair. A check that fixes what it measures cannot fail.
+
 ---
 
 ## How to record a decision

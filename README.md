@@ -30,7 +30,7 @@ writing code.
 |---|---|
 | [`docs/IMPLEMENTATION_PLAN.md`](./docs/IMPLEMENTATION_PLAN.md) | 21 phases plus a Decision Gate: objective, dependencies, files, database changes, tests, acceptance criteria, risks |
 | [`docs/SPEC_AUDIT.md`](./docs/SPEC_AUDIT.md) | 53 findings against the specification — **all resolved**, each with rationale and affected phase |
-| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | The 12 resolved business decisions (`TODO-BD`), 38 ADRs, and 5 product decisions |
+| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | The 12 resolved business decisions (`TODO-BD`), 39 ADRs, and 5 product decisions |
 | [`docs/PRODUCT_REQUIREMENTS.md`](./docs/PRODUCT_REQUIREMENTS.md) | Scope, users, business rules, lifecycle, screens, dashboards |
 | [`docs/DATABASE.md`](./docs/DATABASE.md) | Eleven tables, constraints, triggers, migration order |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Stack, layering, rendering strategy, invariants |

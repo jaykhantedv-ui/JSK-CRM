@@ -101,9 +101,29 @@ export RESTORE_DATABASE_URL='postgresql://…/a_scratch_database'
 scripts/restore.sh s3://$AWS_BACKUP_BUCKET/database/jsk-crm-<stamp>-scheduled.dump.enc
 ```
 
-It verifies the checksum, decrypts, prepares the target's `extensions` schema,
-restores, and then runs `scripts/verify-restore.sql`, which fails unless the
-tables, the relationships, the settings, RLS, and `search_crm()` all come back.
+It verifies the checksum, decrypts, **prepares the target** (see below), restores,
+and then runs `scripts/verify-restore.sql`, which fails unless the tables, the
+relationships, the settings, RLS **and its policies**, the platform schemas and
+`search_crm()` all come back.
+
+### What the target has to have before pg_restore runs
+
+The archive is schema-filtered and `pg_dump` never dumps roles, so three things the
+CRM depends on are simply not in it. `scripts/restore-prepare.sql` creates them —
+that is the whole of the preparation step, and skipping any part of it produces a
+restore that reports success and is not a usable database:
+
+| Missing from the archive | What it looks like if absent |
+|---|---|
+| `pg_trgm`, `pgcrypto` in `extensions` | trigram indexes vanish, `search_crm()` raises on every call |
+| `auth`, `storage` schemas | `schema "storage" does not exist`; with `--clean --if-exists` the DROPs fail too, because `IF EXISTS` tolerates a missing table but not a missing schema |
+| roles `anon`, `authenticated`, `service_role`, … | **every `CREATE POLICY` fails** with `role "authenticated" does not exist` — 45 of them. Tables and rows come back, RLS reads as on, and not one policy exists |
+
+That last one is the dangerous one: a table with RLS enabled and no policy denies
+everything, so the restore looks complete and the database is unusable. Errors are
+never suppressed to get past it — `scripts/test-restore-drill.sh` asserts
+`pg_restore` reports **zero** diagnostics, and compares tables, policies, foreign
+keys, indexes and every table's row count against the source.
 
 **It refuses a target whose URL contains `prod`.** During a real recovery, and
 only then:
