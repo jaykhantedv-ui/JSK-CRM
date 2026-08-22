@@ -71,6 +71,28 @@ pg_restore_admin() { # pg_restore_admin <database> [pg_restore args...]
     ${ADMIN_ARGS[@]+"${ADMIN_ARGS[@]}"} -U "$ADMIN_ROLE" --dbname "$db" "$@"
 }
 
+# pg_dump over the same administrative path.
+#
+# A DISASTER-RECOVERY BACKUP MUST READ THE WHOLE DATABASE, and `postgres` cannot.
+# pg_dump issues `SET row_security = off`, which makes any read of a table with a
+# policy fail unless the reading role is exempt. A role is exempt two ways: it owns
+# the table (policies do not apply to owners), or it has BYPASSRLS. `postgres` is
+# neither a superuser nor BYPASSRLS in this image, so the moment the CRM tables are
+# owned by anything else it can read none of them — every business table comes back
+# with no data and the archive is worthless. That is not hypothetical: it is what
+# the office server produced, and what the completeness guard caught.
+#
+# supabase_admin is a superuser, so it reads everything by definition. This changes
+# nothing about RLS: no policy is altered, nothing is disabled, and no application
+# role gains a privilege. The application still connects as authenticator,
+# supabase_auth_admin and supabase_storage_admin exactly as before. Reading the
+# whole database for a backup is precisely what an administrative role is for.
+pg_dump_admin() { # pg_dump_admin <database> [pg_dump args...]
+  local db="$1"; shift
+  "${DC[@]}" exec -T db pg_dump \
+    ${ADMIN_ARGS[@]+"${ADMIN_ARGS[@]}"} -U "$ADMIN_ROLE" -d "$db" "$@"
+}
+
 # A neutral probe for questions asked BEFORE the admin path is known. `pg_roles` is
 # world-readable, so any role that can connect can answer them; the same two paths
 # are tried so a peer-authenticated socket is not assumed either.

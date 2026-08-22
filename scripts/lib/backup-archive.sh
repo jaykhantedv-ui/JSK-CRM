@@ -27,14 +27,37 @@ BACKUP_BUSINESS_TABLES=(
 # Reading the table of contents is cheap and touches no data.
 assert_archive_complete() {
   local dump="$1" missing="" t
+
+  # 1. The index names every business table.
   for t in "${BACKUP_BUSINESS_TABLES[@]}"; do
     pg_restore -l "$dump" 2>/dev/null | grep -q "TABLE DATA public $t " || missing="$missing $t"
   done
   if [ -n "$missing" ]; then
     echo "The dump is incomplete — no TABLE DATA for:$missing" >&2
-    echo "Refusing to publish it. If pg_dump reported a row-level security error, the" >&2
-    echo "dumping role owns neither the table nor BYPASSRLS; dump as the owner instead." >&2
+    echo "Refusing to publish it. A disaster-recovery backup must be taken by an" >&2
+    echo "administrative role that can read the whole database — see deploy/lib/db-admin.sh." >&2
     return 1
   fi
-  echo "--- archive contains all ${#BACKUP_BUSINESS_TABLES[@]} business tables"
+
+  # 2. The archive actually DECODES, end to end.
+  #
+  # The index alone is not evidence. pg_dump writes the complete table of contents
+  # BEFORE it copies any rows, so an archive whose data blocks are missing still
+  # lists all fourteen tables — `pg_restore -l` reports them and this check used to
+  # pass. Measured: a dump killed by a row-level security error on its first table
+  # listed 14 TABLE DATA entries and contained none of the rows.
+  #
+  # Decoding the whole archive to nowhere costs a second, needs no database, and
+  # fails with `could not read from input file: end of file` on exactly that
+  # truncation.
+  if ! pg_restore -f /dev/null "$dump" >/dev/null 2>"$dump.decode.err"; then
+    echo "The dump does not decode — it is truncated or corrupt:" >&2
+    head -2 "$dump.decode.err" >&2
+    rm -f "$dump.decode.err"
+    echo "Refusing to publish it." >&2
+    return 1
+  fi
+  rm -f "$dump.decode.err"
+
+  echo "--- archive contains all ${#BACKUP_BUSINESS_TABLES[@]} business tables and decodes cleanly"
 }

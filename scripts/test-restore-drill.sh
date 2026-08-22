@@ -174,26 +174,49 @@ su postgres -c "$PGBIN/pg_ctl -D $SHAPED -l $SHAPED/pg.log \
 SHAPED_UP=${SHAPED_UP:-1}
 
 if [ "$SHAPED_UP" = "1" ]; then
+  ADMIN_LABEL=supabase_admin
   SH_ADMIN="postgresql://supabase_admin@127.0.0.1:$SHAPEDPORT/postgres"
   psql "$SH_ADMIN" -q -c "create role postgres login nosuperuser createdb;" >/dev/null 2>&1
-  # Give it a live CRM to back up, restored from the same source the cycles used.
-  #
-  # Restored AS `postgres`, deliberately: on the office server the migrations are
-  # applied by that role, so it owns the CRM tables. Ownership is what lets it dump
-  # them — a role that owns neither the table nor BYPASSRLS cannot COPY an
-  # RLS-protected one, and every table here has RLS. Seeding as the superuser would
-  # have produced a database the production backup could not read, which is a
-  # different bug from the one under test.
+  # Give it a live CRM to back up, owned by the platform superuser — the shape the
+  # office server was in when the backup came back empty. `postgres` is given
+  # pg_read_all_data so that PRIVILEGES are not the variable: it may select from
+  # every table and still cannot dump one, because pg_dump sets `row_security = off`
+  # and that fails for any role which neither owns the table nor has BYPASSRLS.
   psql "$SH_ADMIN" -v ON_ERROR_STOP=1 -q -f "$ROOT/scripts/restore-prepare.sql" >/dev/null 2>&1
-  psql "$SH_ADMIN" -q -c "alter schema public owner to postgres;" \
-                   -c "grant create, connect on database postgres to postgres;" \
+  psql "$SH_ADMIN" -q -c "grant connect on database postgres to postgres;" \
                    -c "grant pg_read_all_data to postgres;" >/dev/null 2>&1
   pg_dump "$SOURCE_DATABASE_URL" --format=custom --no-owner --no-privileges \
     --schema=public --schema=auth --schema=storage --file="$WORK/live.dump" 2>/dev/null
-  pg_restore --dbname "postgresql://postgres@127.0.0.1:$SHAPEDPORT/postgres" \
-    --clean --if-exists --no-owner --no-privileges "$WORK/live.dump" >/dev/null 2>&1
+  pg_restore --dbname "$SH_ADMIN" --clean --if-exists --no-owner --no-privileges \
+    "$WORK/live.dump" >/dev/null 2>&1
   [ "$(psql "$SH_ADMIN" -tAq -c "select count(*) from pg_tables where schemaname='public';" | tr -d ' ')" = "$SRC_TABLES" ] \
-    && ok "a live CRM database exists on the shaped cluster" || bad "could not seed the shaped cluster"
+    && ok "a live CRM exists, owned by $ADMIN_LABEL, with RLS on every table" \
+    || bad "could not seed the shaped cluster"
+  [ "$(psql "$SH_ADMIN" -tAq -c "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' and pg_get_userbyid(c.relowner)='postgres';" | tr -d ' ')" = "0" ] \
+    && ok "the dumping role owns none of them — the office server's shape" \
+    || bad "postgres owns some tables" "the failure under test would not reproduce"
+
+  # --- the reported failure, and the fix, at the level of the guard ------------
+  . "$ROOT/scripts/lib/backup-archive.sh"
+
+  pg_dump "postgresql://postgres@127.0.0.1:$SHAPEDPORT/postgres" \
+    --format=custom --no-owner --no-privileges \
+    --schema=public --schema=auth --schema=storage --file="$WORK/asrole.dump" \
+    >"$WORK/asrole.err" 2>&1
+  grep -q "row-level security" "$WORK/asrole.err" \
+    && ok "as postgres: pg_dump is refused by row-level security" \
+    || bad "as postgres: pg_dump was not refused" "$(head -1 "$WORK/asrole.err")"
+  if assert_archive_complete "$WORK/asrole.dump" >/dev/null 2>&1; then
+    bad "the guard accepted the archive dumped as postgres" "it has no business-table data"
+  else
+    ok "the completeness guard REFUSES that archive — no artifact would be published"
+  fi
+
+  pg_dump "$SH_ADMIN" --format=custom --no-owner --no-privileges \
+    --schema=public --schema=auth --schema=storage --file="$WORK/asadmin.dump" 2>/dev/null
+  assert_archive_complete "$WORK/asadmin.dump" >/dev/null 2>&1 \
+    && ok "as $ADMIN_LABEL: the archive carries all 14 business tables" \
+    || bad "as $ADMIN_LABEL: the archive is still incomplete"
 
   # The transport shim.
   mkdir -p "$WORK/bin"
@@ -242,8 +265,11 @@ SHIM
   grep -q "preparing .* (platform roles, schemas, extensions)" "$WORK/verify.log" \
     && ok "it used the SHARED preparation, not the old extensions-only copy" \
     || bad "it did not run the shared preparation" "the wrappers have diverged again"
-  grep -q "archive contains all 14 business tables" "$WORK/verify.log" \
+  grep -q "archive contains all 14 business tables and decodes cleanly" "$WORK/verify.log" \
     && ok "the production backup checks archive completeness too" || bad "no completeness check on the production path"
+  grep -q "pg_dump (inside the db container, as supabase_admin)" "$WORK/verify.log" \
+    && ok "the production backup dumps as the platform superuser" \
+    || bad "the production backup did not dump as the admin role" "it would read no RLS-protected table"
   grep -q "pg_restore exit=0, 0 error line(s)" "$WORK/verify.log" \
     && ok "pg_restore: exit 0, zero diagnostics" || bad "pg_restore reported errors" "$(grep 'pg_restore exit' "$WORK/verify.log" | head -1)"
   for n in "all 14 business tables present" "policies restored" "public, auth, storage and extensions all present" "search_crm() executes"; do

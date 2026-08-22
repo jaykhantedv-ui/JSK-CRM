@@ -35,14 +35,28 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 NAME="jsk-crm-${STAMP}-daily"
 
 DC=(docker compose --env-file "$ENV_FILE")
+# Reading the whole database is administrative work. Same resolution the restore
+# and the credential alignment use, from one place.
+. "$ROOT/deploy/lib/db-admin.sh"
+require_admin_path || exit 1
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$BACKUP_DIR"
 
-echo "--- pg_dump (inside the db container)"
+echo "--- pg_dump (inside the db container, as $ADMIN_ROLE)"
 # public + auth + storage is the whole business record: the CRM rows, the login
 # identities that own them, and the Storage object metadata. Dumping public alone
 # restores a database nobody can sign in to.
-"${DC[@]}" exec -T db pg_dump -U postgres -d postgres \
+#
+# As $ADMIN_ROLE, not `postgres`. pg_dump sets `row_security = off`, which fails on
+# any table carrying a policy unless the reading role owns it or has BYPASSRLS, and
+# `postgres` is neither a superuser nor BYPASSRLS here. Every CRM table has RLS, so
+# the moment they are not owned by `postgres` it can read none of them: fourteen
+# tables, no data, an archive that restores an empty database. No policy is changed
+# and no application role gains anything — see deploy/lib/db-admin.sh.
+#
+# A failure here must never reach the encryption step: `set -e` stops the script,
+# and the completeness check below reads the artifact rather than trusting that.
+pg_dump_admin postgres \
   --format=custom --no-owner --no-privileges \
   --schema=public --schema=auth --schema=storage > "$WORK/$NAME.dump"
 

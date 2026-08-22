@@ -106,6 +106,30 @@ and then runs `scripts/verify-restore.sql`, which fails unless the tables, the
 relationships, the settings, RLS **and its policies**, the platform schemas and
 `search_crm()` all come back.
 
+### Who takes the backup, and why it is not `postgres`
+
+**`supabase_admin` dumps; `postgres` cannot.** `pg_dump` issues
+`SET row_security = off`, and that fails for any role which neither owns the table
+nor holds `BYPASSRLS`. In the Supabase image `postgres` is an ordinary role — not a
+superuser, not `BYPASSRLS` — so the moment the CRM tables are owned by anything
+else it can read **none** of them. Every business table comes back with no rows and
+the archive restores an empty database. That is what the office server produced,
+and what the completeness guard refused to publish.
+
+Granting `pg_read_all_data` does not help: privileges are not the obstacle, RLS is.
+The fix is the role that is *meant* to read the whole database for recovery, which
+is the platform superuser this deployment already uses for administration
+(`deploy/lib/db-admin.sh`).
+
+**Nothing about RLS changed to make this work.** No policy was altered, none was
+disabled, and no application role gained a privilege — `authenticator`,
+`supabase_auth_admin` and `supabase_storage_admin` connect exactly as before. Only
+the backup, an administrative operation, uses an administrative role.
+
+`scripts/backup.sh` takes its connection from `DATABASE_URL`, so give it an
+administrative role too. If you do not, the guard refuses the archive rather than
+publishing an empty one.
+
 ### Two wrappers, one preparation
 
 There are two restore entry points, and they do the same job for different callers:

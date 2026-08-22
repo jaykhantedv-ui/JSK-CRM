@@ -625,6 +625,23 @@ RLS the authorization boundary. `deploy/db-credentials.sh` verifies that the
 administrative role exists and really is a superuser before it does anything, and
 `service-roles.sql` refuses to run otherwise.
 
+#### What else the administrative path is used for
+
+Three operations need it, and all three are administrative rather than
+application-facing:
+
+| Operation | Why it needs the platform superuser |
+|---|---|
+| Aligning the service-role passwords | the service roles are reserved; only a superuser may alter them |
+| Preparing a restore target | creating the platform roles the archive's policies name |
+| **Taking the backup** | `pg_dump` sets `row_security = off`, which fails for any role that neither owns the table nor has `BYPASSRLS` — and every CRM table has RLS |
+
+That last one is why the office server's first real backup contained no business
+data at all. `postgres` is not a superuser in this image, so once the CRM tables are
+owned by anything else it can read none of them. **No RLS policy was changed to fix
+it and no application role gained a privilege**; the backup simply uses the role
+that exists to read the whole database.
+
 #### How `supabase_admin` is reached — and why it has no password
 
 `supabase_admin` **has no password, by design**, and the deployment must not invent
