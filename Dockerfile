@@ -57,10 +57,15 @@ RUN apk add --no-cache tzdata wget
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 # `standalone` already contains the server and the node_modules actually reached
-# at runtime; static assets and public files are copied alongside it.
+# at runtime; the build's static assets are copied alongside it.
+#
+# There is deliberately no `COPY /app/public`. This application ships no public/
+# directory — nothing is served from one — and BuildKit fails the entire build
+# on a COPY whose source is absent ("/app/public": not found). Next.js serves
+# public/ only when it exists, so there is nothing missing at runtime. If the
+# directory is ever added, restore the copy here.
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 USER nextjs
 EXPOSE 3000
