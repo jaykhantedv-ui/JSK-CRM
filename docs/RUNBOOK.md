@@ -155,6 +155,41 @@ it now says so by name instead of exiting 127.
 The three-way diagnosis and the fourteen-table check are shared — one validator,
 two transports (`ARCHIVE_INSPECT=host|container`).
 
+### Reading a backup log, and what exit 127 means now
+
+`deploy/backup.sh` prints which transport it used, immediately after the dump:
+
+```
+--- pg_dump (inside the db container, as supabase_admin)
+--- dumped 224934 bytes
+--- validating the archive inside the db container (no host client tools needed)
+--- archive contains all 14 business tables and decodes cleanly
+```
+
+**That third line is also a version marker.** If a log goes straight from
+`--- dumped N bytes` to a failure without it, the checkout on that machine predates
+the container transport — `git log --oneline -1` on the server before anything else
+is diagnosed.
+
+Exit 127 is `command not found`, and a bare 127 names nothing. Both backup scripts
+now say what is missing before they start:
+
+- `require_commands` lists **every** absent command by name — `missing on this host,
+  needed for the backup: …`. Note what is *not* in that list: `pg_dump`,
+  `pg_restore` and `psql`. This host is never expected to have PostgreSQL client
+  tools, so if one of those is ever named, something is using the wrong path.
+- `require_container_commands` does the same for the db **container**, which is
+  where those three must exist.
+- An `ERR` trap prints `` FAILED: `cmd` exited 127 (line N) `` for anything that
+  slips through, so the failing command is always named.
+
+`scripts/test-restore-drill.sh` runs the real `deploy/backup.sh --verify` on a host
+where every PostgreSQL client binary exits 127, and asserts that a complete archive
+still validates, that an unreadable one and a readable-but-incomplete one are each
+diagnosed correctly, and that not one host binary was invoked. It also scans the
+deploy scripts for a client binary in command position outside
+`docker compose exec -T db` — and proves that scan catches an injected one.
+
 ### The dump is copied out as a file, never piped
 
 `docker compose exec` multiplexes stdout, and a custom-format dump is large and

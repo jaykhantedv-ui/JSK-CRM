@@ -131,6 +131,23 @@ file_in_cleanup() {
 # validator.
 ARCHIVE_INSPECT=container
 
+# require_container_commands <command>...
+# Everything the deploy path runs inside the db container. Named individually, so
+# an image without one of them says which rather than failing as 127 somewhere.
+require_container_commands() {
+  local missing="" c
+  for c in "$@"; do
+    "${DC[@]}" exec -T db sh -c 'command -v "$1" >/dev/null 2>&1' _ "$c" >/dev/null 2>&1 \
+      || missing="$missing $c"
+  done
+  if [ -n "$missing" ]; then
+    echo "missing INSIDE the db container:${missing}" >&2
+    echo "Check the db image tag in docker-compose.yml — supabase/postgres ships all" >&2
+    echo "of these. The host is not expected to have any of them." >&2
+    return 1
+  fi
+}
+
 # archive_inspect_container <archive> <toc-out> <err-out>
 #   0 readable and decodes · 1 unreadable · 2 lists but will not decode
 #   3 cannot inspect at all

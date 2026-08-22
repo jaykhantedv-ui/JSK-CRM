@@ -247,16 +247,24 @@ if [ "$SHAPED_UP" = "1" ]; then
   # A recording stand-in goes FIRST on PATH. If deploy/backup.sh --verify touches a
   # host pg_restore at all, this file appears; the emulated container resolves the
   # real binary by absolute path, exactly as the real container has its own.
+  #
+  # Every PostgreSQL client binary is stubbed, not just pg_restore: the office
+  # server has none of them, and a validator that quietly reached for psql or
+  # pg_dump instead would fail there in exactly the same way. Each stub exits 127
+  # with the message the shell prints for a missing command, so the failure that
+  # was reported is reproduced rather than approximated.
   mkdir -p "$WORK/nopg"
-  cat > "$WORK/nopg/pg_restore" <<'NOPG'
-#!/bin/sh
-echo called >> "$HOSTPG_MARKER"
-echo "pg_restore: command not found" >&2
-exit 127
-NOPG
-  chmod +x "$WORK/nopg/pg_restore"
   export HOSTPG_MARKER="$WORK/hostpg.called"
   rm -f "$HOSTPG_MARKER"
+  for hostbin in pg_restore psql pg_dump pg_dumpall pg_isready createdb dropdb; do
+    cat > "$WORK/nopg/$hostbin" <<NOPG
+#!/bin/sh
+echo "$hostbin" >> "\$HOSTPG_MARKER"
+echo "$hostbin: command not found" >&2
+exit 127
+NOPG
+    chmod +x "$WORK/nopg/$hostbin"
+  done
 
   # A temporary production.env, removed on exit. There is no real one to disturb.
   [ -f "$PROD_ENV" ] && mv -f "$PROD_ENV" "$PROD_ENV.drillbak"
@@ -297,11 +305,158 @@ NOPG
 
   # --- the host needs no PostgreSQL client tools -------------------------------
   [ ! -f "$HOSTPG_MARKER" ] \
-    && ok "the host's pg_restore was never invoked — validation ran in the container" \
-    || bad "deploy/backup.sh used a host pg_restore" "$(wc -l < "$HOSTPG_MARKER") call(s)"
+    && ok "no host PostgreSQL client binary was invoked — it all ran in the container" \
+    || bad "deploy/backup.sh reached for a host client tool" \
+          "$(sort -u "$HOSTPG_MARKER" | tr '\n' ' ')"
   grep -q "archive contains all 14 business tables and decodes cleanly" "$WORK/verify.log" \
     && ok "and the archive still validated: all 14 tables, decoded" \
     || bad "validation did not complete in the container"
+
+  # A recorded call proves a fault on the paths this run took; this proves it for
+  # every path, including the branches a passing run never enters. Comments are
+  # stripped and a client binary is looked for in COMMAND POSITION — at the start
+  # of a line or after a separator — so `"${DC[@]}" exec -T db psql`, a quoted
+  # `'pg_restore: error' grep pattern and `require_container_commands pg_dump` do
+  # not match, while a bare host call does.
+  scan_host_client_calls() {
+    sed 's/#.*//' "$@" \
+      | grep -nE '(^|[;&|(`]|\$\(|then |do |else )[[:space:]]*(psql|pg_dump|pg_dumpall|pg_restore|pg_isready)([[:space:]]|$)'
+  }
+  HOSTCALLS="$(scan_host_client_calls "$ROOT"/deploy/*.sh "$ROOT"/deploy/lib/*.sh | head -3)"
+  [ -z "$HOSTCALLS" ] \
+    && ok "no deploy script invokes a client binary outside the db container" \
+    || bad "a deploy script calls a PostgreSQL client on the host" "$(printf '%s' "$HOSTCALLS" | tr '\n' ' ')"
+  # ...and the scan is not vacuous.
+  cp "$ROOT/deploy/backup.sh" "$WORK/injected.sh"
+  printf 'pg_restore -l "$WORK/x.dump"\n' >> "$WORK/injected.sh"
+  [ -n "$(scan_host_client_calls "$WORK/injected.sh")" ] \
+    && ok "and that scan does catch one when it is there" \
+    || bad "the host-call scan matches nothing" "it would pass whatever the scripts did"
+  DEVONLY="$(sed 's/#.*//' "$ROOT"/deploy/*.sh "$ROOT"/deploy/lib/*.sh \
+    | grep -nE '(^|[;&|(`]|\$\(|then |do |else )[[:space:]]*(node|npm|npx|pnpm|yarn|supabase|vitest|playwright|tsx|ts-node)([[:space:]]|$)' | head -3)"
+  [ -z "$DEVONLY" ] \
+    && ok "and none reaches for a binary that only exists in development" \
+    || bad "a deploy script needs a development-only binary" "$(printf '%s' "$DEVONLY" | tr '\n' ' ')"
+
+  # --- the three diagnoses, all with NO client tools on PATH --------------------
+  #
+  # The office server reported EXIT=127 immediately after `--- dumped 309152
+  # bytes` — the dump was fine and the thing that opened it was missing. So each
+  # verdict the validator can reach is exercised on a host where every PostgreSQL
+  # binary exits 127, which is that machine. A run that silently fell back to a
+  # host tool would record a call below; one that could not read the archive at
+  # all would report "cannot be inspected" instead of the real verdict.
+  pg_dump "$SH_ADMIN" --format=custom --no-owner --no-privileges \
+    --table=public.users --file="$WORK/partial.dump" 2>/dev/null
+
+  diagnose_without_client_tools() { # <archive> -> stdout+stderr, status on last line
+    rm -f "$HOSTPG_MARKER"
+    PATH="$WORK/nopg:$WORK/bin:$PATH" /usr/bin/env bash -c '
+      set -uo pipefail
+      DC=(docker compose)
+      . "$1/deploy/lib/db-admin.sh"
+      . "$1/scripts/lib/backup-archive.sh"
+      assert_archive_complete "$2"; echo "status=$?"' _ "$ROOT" "$1" 2>&1
+  }
+
+  GOOD_OUT="$(diagnose_without_client_tools "$WORK/asadmin.dump")"
+  case "$GOOD_OUT" in
+    *"inside the db container"*) ok "with no client tools: it says where it is validating" ;;
+    *) bad "no transport banner" "a deploy log without this line is running older code" ;;
+  esac
+  case "$GOOD_OUT" in
+    *"all 14 business tables and decodes cleanly"*status=0*)
+      ok "with no client tools: a COMPLETE archive still validates" ;;
+    *) bad "a complete archive failed on a host without client tools" \
+           "$(printf '%s' "$GOOD_OUT" | grep -v '^$' | tail -2 | tr '\n' ' ')" ;;
+  esac
+  [ ! -f "$HOSTPG_MARKER" ] \
+    && ok "and it did so without invoking one host binary" \
+    || bad "it fell back to a host client tool" "$(sort -u "$HOSTPG_MARKER" | tr '\n' ' ')"
+
+  BAD_OUT="$(diagnose_without_client_tools "$WORK/trunc.dump")"
+  case "$BAD_OUT" in
+    *"truncated or corrupt"*status=1*)
+      ok "with no client tools: an UNREADABLE archive is diagnosed as transport" ;;
+    *) bad "an unreadable archive was misdiagnosed without client tools" \
+           "$(printf '%s' "$BAD_OUT" | grep -v '^$' | tail -2 | tr '\n' ' ')" ;;
+  esac
+
+  PART_OUT="$(diagnose_without_client_tools "$WORK/partial.dump")"
+  case "$PART_OUT" in
+    *"readable but incomplete"*status=1*)
+      ok "with no client tools: a READABLE BUT INCOMPLETE archive is named as such" ;;
+    *) bad "an incomplete archive was misdiagnosed without client tools" \
+           "$(printf '%s' "$PART_OUT" | grep -v '^$' | tail -2 | tr '\n' ' ')" ;;
+  esac
+  case "$PART_OUT" in
+    *"no TABLE DATA for: outlets"*) ok "and it lists the tables that are missing" ;;
+    *) bad "the incomplete diagnosis did not name the missing tables" ;;
+  esac
+
+  # --- a missing command names itself instead of only returning 127 -------------
+  MISSING_OUT="$(/bin/bash -c '
+      . "$1/scripts/lib/preflight.sh"
+      PATH=/nonexistent-for-this-check
+      require_commands "the backup" docker sha256sum; echo "status=$?"' _ "$ROOT" 2>&1)"
+  case "$MISSING_OUT" in
+    *"docker"*"sha256sum"*status=1*)
+      ok "a missing command is reported BY NAME, not as a bare 127" ;;
+    *) bad "missing commands were not named" "said: $(printf '%s' "$MISSING_OUT" | head -1)" ;;
+  esac
+  cat > "$WORK/errprobe.sh" <<'PROBE'
+. "$1/scripts/lib/preflight.sh"
+trap 'report_failed_command $LINENO' ERR
+set -e
+definitely-not-a-real-command --please
+PROBE
+  ERR_OUT="$(/bin/bash "$WORK/errprobe.sh" "$ROOT" 2>&1)"
+  case "$ERR_OUT" in
+    *"definitely-not-a-real-command"*127*)
+      ok "and an unexpected 127 prints the command that produced it" ;;
+    *) bad "a 127 was not attributed to a command" "said: $(printf '%s' "$ERR_OUT" | tail -1)" ;;
+  esac
+
+  # --- and a restore that DOES report errors still says which ------------------
+  #
+  # deploy/restore.sh captures pg_restore's status instead of dying on it, so it
+  # can print the errors that were reported. A trap firing inside that block would
+  # exit on the status first and swallow them, so the FAILURE path is exercised
+  # here and not only the success one.
+  #
+  # The fault is forced realistically and nothing is suppressed: a table whose
+  # column type lives in a schema the archive does not carry, so pg_restore
+  # genuinely errors on it.
+  psql "$SH_ADMIN" -q \
+    -c "create schema zz_absent;" \
+    -c "create type zz_absent.grade as enum ('a','b');" \
+    -c "create table public.zz_probe(id int primary key, g zz_absent.grade);" >/dev/null 2>&1
+  pg_dump "$SH_ADMIN" --format=custom --no-owner --no-privileges \
+    --schema=public --schema=auth --schema=storage --file="$WORK/faulty.dump" 2>/dev/null
+  ( set -a; . "$PROD_ENV"; set +a
+    openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
+      -in "$WORK/faulty.dump" -out "$WORK/faulty.enc" -pass env:BACKUP_PASSPHRASE )
+  rm -f "$HOSTPG_MARKER"
+  PATH="$WORK/nopg:$WORK/bin:$PATH" "$ROOT/deploy/restore.sh" --scratch "$WORK/faulty.enc" \
+    >"$WORK/faulty.log" 2>&1
+  FSTATUS=$?
+  psql "$SH_ADMIN" -q -c "drop table if exists public.zz_probe;" \
+                   -c "drop schema if exists zz_absent cascade;" >/dev/null 2>&1
+  [ "$FSTATUS" != "0" ] \
+    && ok "a restore that reports errors fails rather than reporting VERIFIED" \
+    || bad "an erroring restore was reported as verified" "exit $FSTATUS"
+  grep -q "the restore reported errors" "$WORK/faulty.log" \
+    && ok "and it says so in those words" \
+    || bad "the failure message was not reached" "$(tail -2 "$WORK/faulty.log" | tr '\n' ' ')"
+  grep -q "pg_restore: error" "$WORK/faulty.log" \
+    && ok "and prints the pg_restore error lines instead of swallowing them" \
+    || bad "the pg_restore errors were not printed" "a trap exited before they were read"
+  [ ! -f "$HOSTPG_MARKER" ] \
+    && ok "the failing restore used no host client tool either" \
+    || bad "deploy/restore.sh reached for a host client tool" "$(sort -u "$HOSTPG_MARKER" | tr '\n' ' ')"
+  [ "$(psql "$SH_ADMIN" -tAq -c "select count(*) from pg_database where datname like 'jsk_restore_check_%';" | tr -d ' ')" = "0" ] \
+    && ok "and its scratch database was dropped on the way out" \
+    || bad "a scratch database survived a failed restore"
 
   # And the host path still reports missing client tools clearly rather than 127.
   HOSTMSG="$(/bin/bash -c 'PATH=/nonexistent-for-this-check

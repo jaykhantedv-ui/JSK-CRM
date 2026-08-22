@@ -38,7 +38,16 @@ DC=(docker compose --env-file "$ENV_FILE")
 # Reading the whole database is administrative work. Same resolution the restore
 # and the credential alignment use, from one place.
 . "$ROOT/deploy/lib/db-admin.sh"
+
+# Name what is missing rather than exiting 127 somewhere downstream. Note what is
+# NOT in this list: pg_dump, pg_restore and psql. This host is never expected to
+# have PostgreSQL client tools — every one of those runs inside the db container.
+. "$ROOT/scripts/lib/preflight.sh"
+require_commands "the backup" docker openssl sha256sum stat cmp find awk || exit 1
+trap 'report_failed_command $LINENO' ERR
+
 require_admin_path || exit 1
+require_container_commands pg_dump pg_restore sh || exit 1
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$BACKUP_DIR"
 

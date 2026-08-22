@@ -34,6 +34,9 @@ DC=(docker compose --env-file "$ENV_FILE")
 # roles the archive's policies name — is superuser work, and `postgres` is not one
 # in this image. Same resolution as deploy/db-credentials.sh, from one place.
 . "$ROOT/deploy/lib/db-admin.sh"
+. "$ROOT/scripts/lib/preflight.sh"
+require_commands "the restore" docker openssl sha256sum || exit 1
+trap 'report_failed_command $LINENO' ERR
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # Resolve the administrative path before anything needs it, so a server this
@@ -108,16 +111,21 @@ echo "--- pg_restore into ${TARGET}"
 # Copied in as a file for the same reason the backup copies out as one: a
 # multiplexed exec stream is not a safe way to move a large binary archive.
 INSIDE="$(file_in "$WORK/restore.dump")"
+# The ERR trap comes off with `set -e` and goes back on with it. A trap that fires
+# here would exit on pg_restore's status before the error lines below are read —
+# and those lines are the whole point of running it this way.
+trap - ERR
 set +e
 pg_restore_admin "$TARGET" \
   --no-owner --no-privileges --clean --if-exists "$INSIDE" 2> "$WORK/restore.log"
 STATUS=$?
 set -e
+trap 'report_failed_command $LINENO' ERR
 file_in_cleanup
 ERRORS=$(grep -c 'pg_restore: error' "$WORK/restore.log" || true)
 echo "--- pg_restore exit=${STATUS}, ${ERRORS} error line(s)"
 if [ "$ERRORS" -gt 0 ] || [ "$STATUS" -ne 0 ]; then
-  grep 'pg_restore: error' "$WORK/restore.log" | head -10
+  grep 'pg_restore: error' "$WORK/restore.log" | head -10 || true
   echo "the restore reported errors — this backup is NOT verified" >&2
   exit 1
 fi

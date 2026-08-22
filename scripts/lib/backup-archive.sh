@@ -38,8 +38,15 @@ BACKUP_BUSINESS_TABLES=(
 #   3  cannot inspect at all: no pg_restore available
 archive_inspect() {
   case "$ARCHIVE_INSPECT" in
-    container) archive_inspect_container "$@" ;;
-    *)         archive_inspect_host "$@" ;;
+    container)
+      # Printed so a log shows which transport ran. Its ABSENCE from a deploy log
+      # means the running code predates this, which is worth knowing before
+      # anything else is diagnosed.
+      echo "--- validating the archive inside the db container (no host client tools needed)"
+      archive_inspect_container "$@" ;;
+    *)
+      echo "--- validating the archive with the host's pg_restore"
+      archive_inspect_host "$@" ;;
   esac
 }
 

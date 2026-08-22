@@ -1963,6 +1963,64 @@ wrappers, so a future divergence fails a test rather than a deployment.
 - **Create the roles inside `verify-restore.sql`.** Rejected: verification must
   observe, never repair. A check that fixes what it measures cannot fail.
 
+### ADR-038 — The archive is validated inside the db container, and every dependency names itself
+
+**Status:** Accepted
+**Date:** 2026-08-22   **Decided by:** Engineering
+
+**Context.** The office server's backup stopped with `EXIT=127` immediately after
+`--- dumped 309152 bytes`. The dump itself was fine: 309 KB, taken inside the
+container as `supabase_admin`, containing data for all fourteen business tables.
+What failed was the step that opened it. Reading a custom-format archive needs
+`pg_restore`, the validator called it **on the host**, and the host has no
+PostgreSQL client tools installed — nor should it, when a container with the exact
+matching PostgreSQL version is already running.
+
+Exit 127 is `command not found` and names nothing, so the first report gave no way
+to tell *which* command was missing, and the same 127 was reported again after the
+transport had already been moved into the container. Two rounds were spent
+excluding candidates by reading source.
+
+**Decision.**
+
+- One validator, two transports. `scripts/lib/backup-archive.sh` owns the
+  three-way diagnosis and the fourteen-table check; `ARCHIVE_INSPECT` selects
+  `host` (`scripts/backup.sh`, CI, a laptop) or `container` (`deploy/backup.sh`,
+  set by `deploy/lib/db-admin.sh`, which owns the compose transport).
+- Under `container`, the archive goes in with `docker compose cp`, `pg_restore -l`
+  and `pg_restore -f /dev/null` run under `sh -c` inside the container writing to
+  files there, and the table of contents comes back with `cp`. Only an exit status
+  crosses the exec stream — never a byte of the archive.
+- **Nothing fails with an anonymous 127.** `require_commands` names every missing
+  host command before work starts, `require_container_commands` does the same
+  inside the container, and an `ERR` trap prints the command, its status and its
+  line for anything else. The host list deliberately excludes `pg_dump`,
+  `pg_restore` and `psql`: if one is ever named there, the wrong path is running.
+- The transport is **printed** — `--- validating the archive inside the db
+  container` — so a log identifies which code ran. Its absence dates the checkout.
+- `scripts/test-restore-drill.sh` runs the real `deploy/backup.sh --verify` on a
+  host where every PostgreSQL client binary exits 127, and asserts a complete
+  archive validates, an unreadable and a readable-but-incomplete archive are each
+  diagnosed correctly, and no host binary is invoked. A static scan additionally
+  rejects a client binary in command position anywhere in `deploy/` outside
+  `docker compose exec -T db`, and proves itself against an injected call.
+
+**Consequences.** The office server needs no PostgreSQL installation and no
+version-matching between host and container — the tools that read the archive are
+by construction the ones that wrote it. `scripts/backup.sh` is unchanged for CI and
+laptops, except that a missing `pg_restore` there now says so by name. The backup
+format, the encryption and the schema are untouched.
+
+**Alternatives considered.**
+- **Install `postgresql-client` on the host.** Rejected: a second copy of the
+  toolchain to keep version-matched with the image, on a machine whose whole point
+  is that one `docker compose up` is the deployment.
+- **Pipe the archive through `docker compose exec` to a host `pg_restore`.**
+  Rejected twice over: it needs the host tools anyway, and that stream is what
+  truncated a 220 KB archive to 95,811 bytes (ADR-037).
+- **Skip validation when no `pg_restore` is available.** Rejected: an unverified
+  backup is a guess, and a check that silently opts out is worse than none.
+
 ---
 
 ## How to record a decision
