@@ -12,8 +12,9 @@
 --     FATAL: password authentication failed for user "authenticator"
 --     FATAL: password authentication failed for user "supabase_storage_admin"
 --
--- while `db` itself looks perfectly healthy, because `pg_isready` and every
--- `psql -U postgres` check use the superuser whose password IS set. Upstream
+-- while `db` itself looks perfectly healthy, because `pg_isready` and a
+-- `psql -U postgres` check inside the container go over a trusted loopback rule
+-- and never verify a password at all. Upstream
 -- Supabase's own self-hosting compose solves this the same way, with a `roles.sql`
 -- that re-assigns these passwords after initdb.
 --
@@ -29,11 +30,34 @@
 -- prints it: the generated `alter role` statements are executed inside a DO block
 -- rather than returned as rows.
 --
--- Run as the `postgres` superuser:
---     psql -v ON_ERROR_STOP=1 -f deploy/db/service-roles.sql
--- deploy/db-credentials.sh does exactly that, inside the db container.
+-- Run as `supabase_admin`, the platform superuser — NOT as `postgres`, which is
+-- an ordinary role in this image and may not alter a reserved role:
+--     psql -U supabase_admin -v ON_ERROR_STOP=1 -f deploy/db/service-roles.sql
+-- deploy/db-credentials.sh does exactly that, inside the db container. The
+-- pre-flight below refuses anything else.
 
 \set ON_ERROR_STOP on
+
+-- THIS MUST RUN AS A SUPERUSER, AND `postgres` IS NOT ONE HERE.
+--
+-- In the Supabase image the bootstrap superuser is `supabase_admin`; `postgres`
+-- is an ordinary role. The three service roles are additionally protected as
+-- reserved roles, so altering them as `postgres` fails outright:
+--
+--     "authenticator" is a reserved role, only superusers can modify it
+--
+-- Reading `pg_authid` to check the stored verifier needs superuser too, so a
+-- non-superuser session cannot even verify its own work. Fail here, by name,
+-- rather than part-way through with a permission error per role.
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
+    raise exception
+      'service-role alignment must run as a superuser; % is not one (use supabase_admin)',
+      current_user;
+  end if;
+end $$;
+
 \set pgpass `echo "$POSTGRES_PASSWORD"`
 
 -- THE VERIFIER MUST BE SCRAM. This is the half that a loopback test cannot see.

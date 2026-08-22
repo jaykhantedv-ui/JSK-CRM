@@ -602,10 +602,28 @@ FATAL: password authentication failed for user "authenticator"
 FATAL: password authentication failed for user "supabase_storage_admin"
 ```
 
-The database looks **healthy** the whole time, because `pg_isready` and every
-`psql -U postgres` check speak as the superuser whose password *is* set. That is
-what makes this failure confusing: `docker compose ps` shows a healthy `db` and
-three services restart-looping.
+The database looks **healthy** the whole time, because `pg_isready` and a
+`psql -U postgres` check *inside the container* go over the image's trusted
+loopback rule and never verify a password at all. That is what makes this failure
+confusing: `docker compose ps` shows a healthy `db` and three services
+restart-looping.
+
+**The alignment runs as `supabase_admin`, not as `postgres`.** In this image
+`postgres` is an ordinary role — `rolsuper` is false — and `supabase_admin` is the
+bootstrap superuser. The three service roles are additionally protected as reserved
+roles, so altering them as `postgres` fails with
+
+```
+"authenticator" is a reserved role, only superusers can modify it
+```
+
+and reading `pg_authid` to check the stored verifier needs superuser as well. This
+is an **administrative path only**: no service connects as `supabase_admin` or as
+`postgres`. PostgREST still connects as `authenticator`, GoTrue as
+`supabase_auth_admin` and Storage as `supabase_storage_admin`, which is what keeps
+RLS the authorization boundary. `deploy/db-credentials.sh` verifies that the
+administrative role exists and really is a superuser before it does anything, and
+`service-roles.sql` refuses to run otherwise.
 
 `deploy/db/service-roles.sql` re-assigns those three passwords from
 `POSTGRES_PASSWORD`, and `deploy/db-credentials.sh` applies it and proves it worked.

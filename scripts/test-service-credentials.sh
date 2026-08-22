@@ -1,43 +1,46 @@
 #!/usr/bin/env bash
-# Deployment regression test: the Supabase service roles must authenticate under
-# scram-sha-256 FROM ANOTHER HOST ON THE NETWORK — not merely over loopback.
+# Deployment regression test for the self-hosted Supabase service credentials.
 #
 #   scripts/test-service-credentials.sh
 #
-# WHAT IT REPRODUCES. On the office server PostgreSQL was healthy, the three roles
-# existed, and a psql login inside the db container succeeded — while GoTrue,
-# PostgREST and storage-api all restart-looped on `password authentication failed`.
-# The database's pg_hba.conf is why:
+# It builds a THROWAWAY PostgreSQL cluster that reproduces the Supabase image's
+# privilege layout and pg_hba shape, and proves the alignment works there. Three
+# separate faults hid behind one another on the office server, and each needs a
+# different property of that cluster to be visible at all:
 #
-#     host all all 127.0.0.1/32   trust           <- the loopback test, proves nothing
-#     host all all 172.16.0.0/12  scram-sha-256   <- what the services actually use
+#   1. WRONG ADMINISTRATIVE ROLE. In the image `postgres` is an ordinary role and
+#      `supabase_admin` is the superuser, and the three service roles are reserved:
+#          "authenticator" is a reserved role, only superusers can modify it
+#      So the cluster here is initdb'd with supabase_admin as the BOOTSTRAP
+#      superuser and `postgres` created afterwards as an ordinary role. PostgreSQL
+#      refuses to remove SUPERUSER from a cluster's own bootstrap user, so this is
+#      the only faithful way to model it.
 #
-# Under `trust` the password is never checked, so a role whose stored verifier
-# cannot satisfy SCRAM at all still "passes". `alter role ... password` stores the
-# verifier in whatever scheme `password_encryption` names at that moment, and an
-# image configured for md5 produces an md5 verifier that no scram-sha-256 rule can
-# ever accept.
+#   2. WRONG VERIFIER SCHEME. `alter role ... password` stores whatever
+#      `password_encryption` names at that moment. An md5 verifier cannot satisfy a
+#      `scram-sha-256` rule, so the role gets a password that works from one
+#      address and is refused from every other.
 #
-# This test recreates both halves on a real PostgreSQL server: a loopback `trust`
-# rule and an off-loopback `scram-sha-256` rule. It proves the md5 verifier passes
-# over loopback and FAILS over the network — the exact false positive — then
-# applies deploy/db/service-roles.sql and proves the network login succeeds.
+#   3. A TEST THAT COULD NOT FAIL. The image trusts loopback:
+#          host all all 127.0.0.1/32   trust
+#          host all all 172.16.0.0/12  scram-sha-256
+#      so a login from inside the db container never checks the password. Both
+#      rules exist here, on loopback and on a real off-loopback address, and the
+#      md5 verifier is shown passing over the first and failing over the second.
 #
-# It needs no container images, so the fix is provable wherever the Supabase images
-# cannot be pulled. postgresql.conf, pg_hba.conf and every role it touches are
-# restored on exit, including on failure.
+# Needs no container images, and touches no other cluster: everything happens in a
+# temporary data directory that is removed on exit, including on failure.
 #
 # NO PASSWORD OR VERIFIER IS PRINTED. Only the scheme's name is ever reported.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PGBIN=${PGBIN:-/usr/lib/postgresql/16/bin}
-PGDATA=${PGDATA:-/var/lib/pgdata}
-PGPORT=${PGPORT:-54322}
-HBA="$PGDATA/pg_hba.conf"
+TESTDATA=${TESTDATA:-/var/lib/jsk-cred-test}
+TESTPORT=${TESTPORT:-54399}
+ADMIN_ROLE=supabase_admin
 ROLES=(authenticator supabase_auth_admin supabase_storage_admin)
 
-# The off-loopback address standing in for the Docker bridge subnet.
 NETHOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "$NETHOST" ] || { echo "no non-loopback address on this host — cannot test the network path" >&2; exit 1; }
 NETCIDR="$(echo "$NETHOST" | awk -F. '{print $1"."$2"."$3".0/24"}')"
@@ -48,89 +51,84 @@ bad() { printf '  \033[31mFAIL\033[0m  %s\n     %s\n' "$1" "${2:-}"; FAIL=$((FAI
 
 CONFIGURED="$(openssl rand -hex 24)"
 
-# Loopback stays `trust` for the whole run — exactly as on the server — so
-# administration is always possible no matter what state scram is in.
-admin() { psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGPORT" -U postgres -d postgres "$@"; }
-
-# Write through the EXISTING file so its inode, owner and mode survive. A
-# pg_hba.conf the server cannot read is not an error it reports — the reload
-# silently keeps the rules already loaded, and every check below would then pass
-# for the wrong reason.
-own_write() { # own_write <path>
-  local f="$1" o m; o="$(stat -c '%U:%G' "$f" 2>/dev/null || echo postgres:postgres)"
-  m="$(stat -c '%a' "$f" 2>/dev/null || echo 600)"
-  cat > "$f"; chown "$o" "$f" 2>/dev/null || true; chmod "$m" "$f" 2>/dev/null || true
+cleanup() {
+  su postgres -c "$PGBIN/pg_ctl -D $TESTDATA -w -s -m immediate stop" >/dev/null 2>&1 || true
+  rm -rf "$TESTDATA" "$ROOT/.cred-test.err"
 }
-# listen_addresses is passed on the postgres COMMAND LINE by scripts/db.sh, and a
-# command-line setting overrides postgresql.conf — so widening it means restarting
-# with a different option, not editing a file. `pg_ctl restart` alone would simply
-# replay the recorded options.
-pg_listen_on() { # pg_listen_on <address>
-  su postgres -c "$PGBIN/pg_ctl -D $PGDATA -w -s stop" >/dev/null 2>&1 || true
-  su postgres -c "$PGBIN/pg_ctl -D $PGDATA -l /var/log/pg/pg.log \
-     -o '-p $PGPORT -c listen_addresses=$1 -c timezone=UTC' -w start" >/dev/null 2>&1
-  sleep 1
-}
+trap cleanup EXIT
 
-pre_existing=""
-restore() {
-  [ -f "$HBA.bak" ] && { own_write "$HBA" < "$HBA.bak"; rm -f "$HBA.bak"; }
-  pg_listen_on 127.0.0.1
-  for r in "${ROLES[@]}"; do
-    if [[ " $pre_existing " == *" $r "* ]]; then
-      admin -c "alter role \"$r\" with password null;" >/dev/null 2>&1 || true
-    else
-      admin -c "drop role if exists \"$r\";" >/dev/null 2>&1 || true
-    fi
-  done
-  rm -f "$ROOT/.cred-test.err"
-}
-trap restore EXIT
-
-pg_isready -h 127.0.0.1 -p "$PGPORT" -q || { echo "no PostgreSQL on 127.0.0.1:$PGPORT — run scripts/db.sh start" >&2; exit 1; }
-echo "Service-role credential regression test (network / scram-sha-256)"
-echo "  off-loopback address under test: $NETHOST  (rule: $NETCIDR)"
+echo "Service-role credential regression test"
+echo "  throwaway cluster on port $TESTPORT; off-loopback address $NETHOST ($NETCIDR)"
 echo
 
-# --- arrange: the server's own pg_hba shape ----------------------------------
-cp -f "$HBA" "$HBA.bak"
-own_write "$HBA" <<HBA_RULES
-local   all all                       trust
-host    all all 127.0.0.1/32          trust
-host    all all ${NETCIDR}            scram-sha-256
-HBA_RULES
-pg_listen_on '*'
-pg_isready -h "$NETHOST" -p "$PGPORT" -q || { echo "the server is not listening on $NETHOST" >&2; exit 1; }
+# --- a cluster shaped like the Supabase image --------------------------------
+rm -rf "$TESTDATA"; mkdir -p "$TESTDATA"; chown postgres:postgres "$TESTDATA"; chmod 700 "$TESTDATA"
+su postgres -c "$PGBIN/initdb -D $TESTDATA -U $ADMIN_ROLE --auth-local=trust --auth-host=trust -E UTF8 --locale=C" >/dev/null 2>&1 \
+  || { echo "initdb failed" >&2; exit 1; }
 
-for r in "${ROLES[@]}"; do
-  if admin -tAc "select 1 from pg_roles where rolname = '$r';" | grep -qx 1; then
-    pre_existing="$pre_existing $r"
-  else
-    admin -c "create role \"$r\" login noinherit;" >/dev/null
-  fi
-done
+# Loopback trusted, the network under scram — exactly the image's shape.
+cat > "$TESTDATA/pg_hba.conf" <<HBA
+local   all all                  trust
+host    all all 127.0.0.1/32     trust
+host    all all ${NETCIDR}       scram-sha-256
+HBA
+chown postgres:postgres "$TESTDATA/pg_hba.conf"; chmod 600 "$TESTDATA/pg_hba.conf"
 
-# Log in as $1 with the configured password. $2 = host.
-login() {
+su postgres -c "$PGBIN/pg_ctl -D $TESTDATA -l $TESTDATA/pg.log \
+   -o '-p $TESTPORT -c listen_addresses=* -c timezone=UTC' -w start" >/dev/null 2>&1 \
+  || { echo "could not start the test cluster; see $TESTDATA/pg.log" >&2; exit 1; }
+
+sadmin()  { psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$TESTPORT" -U "$ADMIN_ROLE" -d postgres "$@"; }
+pgadmin() { psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$TESTPORT" -U postgres      -d postgres "$@"; }
+
+# `postgres` as the image has it: a login role with no superuser attribute.
+sadmin -c "create role postgres login nosuperuser nocreaterole;" >/dev/null
+for r in "${ROLES[@]}"; do sadmin -c "create role \"$r\" login noinherit;" >/dev/null; done
+
+login() { # login <role> <host>
   PGPASSWORD="$CONFIGURED" psql -X -q -tAc 'select 1' \
-    -h "$2" -p "$PGPORT" -U "$1" -d postgres 2>"$ROOT/.cred-test.err" | grep -qx 1
+    -h "$2" -p "$TESTPORT" -U "$1" -d postgres 2>"$ROOT/.cred-test.err" | grep -qx 1
 }
-# The stored verifier's SCHEME only — never the verifier.
-scheme() {
-  admin -tAc "select case
-                when rolpassword is null then 'none'
-                when rolpassword like 'SCRAM-SHA-256\$%' then 'SCRAM-SHA-256'
-                when rolpassword like 'md5%' then 'md5'
-                else 'other' end
-              from pg_authid where rolname = '$1';" 2>/dev/null | tr -d '[:space:]'
+scheme() { # the stored verifier's SCHEME only — never the verifier
+  sadmin -tAc "select case
+                 when rolpassword is null then 'none'
+                 when rolpassword like 'SCRAM-SHA-256\$%' then 'SCRAM-SHA-256'
+                 when rolpassword like 'md5%' then 'md5'
+                 else 'other' end
+               from pg_authid where rolname = '$1';" 2>/dev/null | tr -d '[:space:]'
 }
-# What a database image configured for md5 leaves behind.
-write_md5_verifiers() {
-  admin -c "set password_encryption = 'md5';" >/dev/null 2>&1
+write_md5_verifiers() { # what an image configured for md5 leaves behind
   for r in "${ROLES[@]}"; do
-    admin -c "set password_encryption='md5'; alter role \"$r\" with password '$CONFIGURED';" >/dev/null
+    sadmin -c "set password_encryption='md5'; alter role \"$r\" with password '$CONFIGURED';" >/dev/null
   done
 }
+align_as() { # align_as <sadmin|pgadmin>
+  POSTGRES_PASSWORD="$CONFIGURED" "$1" -f "$ROOT/deploy/db/service-roles.sql" >"$ROOT/.cred-test.err" 2>&1
+}
+
+# --- 0. the privilege layout --------------------------------------------------
+echo "Supabase privilege layout"
+[ "$(sadmin -tAc "select rolsuper from pg_roles where rolname='postgres';" | tr -d '[:space:]')" = "f" ] \
+  && ok "postgres is NOT a superuser (as in the Supabase image)" \
+  || bad "postgres is a superuser here" "the layout under test is not the server's"
+[ "$(sadmin -tAc "select rolsuper from pg_roles where rolname='$ADMIN_ROLE';" | tr -d '[:space:]')" = "t" ] \
+  && ok "$ADMIN_ROLE IS the superuser" \
+  || bad "$ADMIN_ROLE is not a superuser" "nothing below would be a real test"
+
+# The deployment used to run this as `postgres`. On the server that produced
+# `"authenticator" is a reserved role, only superusers can modify it`.
+if align_as pgadmin; then
+  bad "the alignment succeeded as postgres" "a non-superuser must not be able to alter these roles"
+else
+  ok "the alignment REFUSES to run as postgres"
+fi
+grep -qi "superuser" "$ROOT/.cred-test.err" \
+  && ok "and it names the reason, before touching any role" \
+  || bad "the refusal did not mention superuser" "$(head -1 "$ROOT/.cred-test.err")"
+[ "$(scheme authenticator)" = "none" ] \
+  && ok "the refused run left every role untouched" \
+  || bad "the refused run modified a role" "authenticator scheme: $(scheme authenticator)"
+echo
 
 # --- 1. the defect, reproduced ------------------------------------------------
 echo "The office-server failure, reproduced (md5 verifier + scram rule)"
@@ -140,11 +138,8 @@ for r in "${ROLES[@]}"; do
                                || bad "$r did not store an md5 verifier" "got: $(scheme "$r")"
 done
 for r in "${ROLES[@]}"; do
-  if login "$r" 127.0.0.1; then
-    ok "$r 'passes' over loopback — the false positive, because 127.0.0.1 is trust"
-  else
-    bad "$r did not pass over loopback" "the trust rule is not in effect; the test proves nothing"
-  fi
+  login "$r" 127.0.0.1 && ok "$r 'passes' over loopback — the false positive, 127.0.0.1 is trust" \
+                       || bad "$r did not pass over loopback" "the trust rule is not in effect"
 done
 for r in "${ROLES[@]}"; do
   if login "$r" "$NETHOST"; then
@@ -157,13 +152,10 @@ for r in "${ROLES[@]}"; do
 done
 echo
 
-# --- 2. the fix ---------------------------------------------------------------
-echo "After deploy/db/service-roles.sql"
-if POSTGRES_PASSWORD="$CONFIGURED" admin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1; then
-  ok "the alignment script applied cleanly"
-else
-  bad "the alignment script failed to apply"
-fi
+# --- 2. the fix, run as the platform superuser --------------------------------
+echo "After deploy/db/service-roles.sql, run as $ADMIN_ROLE"
+align_as sadmin && ok "the alignment applied cleanly as $ADMIN_ROLE" \
+                || bad "the alignment failed as $ADMIN_ROLE" "$(head -2 "$ROOT/.cred-test.err" | tail -1)"
 for r in "${ROLES[@]}"; do
   [ "$(scheme "$r")" = "SCRAM-SHA-256" ] && ok "$r now has a SCRAM-SHA-256 verifier" \
                                          || bad "$r has no SCRAM verifier" "scheme: $(scheme "$r")"
@@ -174,55 +166,42 @@ for r in "${ROLES[@]}"; do
 done
 echo
 
-# --- 3. the alignment refuses to leave a non-SCRAM verifier -------------------
-echo "Guard: the alignment asserts the verifier it stored"
+# --- 3. a server whose own default is md5 -------------------------------------
+echo "Guard: a server configured for md5"
 write_md5_verifiers
-admin -c "alter system set password_encryption = 'md5';" >/dev/null 2>&1
-admin -c "select pg_reload_conf();" >/dev/null 2>&1
-if POSTGRES_PASSWORD="$CONFIGURED" admin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1; then
-  ok "it still produced SCRAM verifiers on a server configured for md5"
-else
-  bad "it failed on a server configured for md5" "it must override password_encryption for its own session"
-fi
+sadmin -c "alter system set password_encryption = 'md5';" >/dev/null 2>&1
+sadmin -c "select pg_reload_conf();" >/dev/null 2>&1
+align_as sadmin && ok "it still produced SCRAM verifiers on an md5 server" \
+                || bad "it failed on an md5 server" "it must override password_encryption for its own session"
 allscram=1; for r in "${ROLES[@]}"; do [ "$(scheme "$r")" = "SCRAM-SHA-256" ] || allscram=0; done
-[ "$allscram" = 1 ] && ok "server default md5 did not leak into the stored verifiers" \
+[ "$allscram" = 1 ] && ok "the server default did not leak into the stored verifiers" \
                     || bad "an md5 verifier survived the alignment"
 netok=1; for r in "${ROLES[@]}"; do login "$r" "$NETHOST" || netok=0; done
 [ "$netok" = 1 ] && ok "all three authenticate over the network" || bad "a role fails over the network"
-admin -c "alter system reset password_encryption;" >/dev/null 2>&1
-admin -c "select pg_reload_conf();" >/dev/null 2>&1
+sadmin -c "alter system reset password_encryption;" >/dev/null 2>&1
+sadmin -c "select pg_reload_conf();" >/dev/null 2>&1
 echo
 
 # --- 4. idempotent ------------------------------------------------------------
 echo "Re-running it (an existing deployment restarting)"
-POSTGRES_PASSWORD="$CONFIGURED" admin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1
+align_as sadmin
 netok=1; for r in "${ROLES[@]}"; do login "$r" "$NETHOST" || netok=0; done
 [ "$netok" = 1 ] && ok "all three still authenticate — idempotent, nothing corrupted" \
                  || bad "a role stopped authenticating after a second run"
 echo
 
-# --- 5. a fresh database ------------------------------------------------------
+# --- 5. a fresh volume --------------------------------------------------------
 echo "Fresh initialisation (a volume that has never been aligned)"
-# Not a drop-and-recreate: supabase_auth_admin owns the auth schema, so dropping it
-# fails on its dependencies. The state that matters is the one a new volume is in —
-# the roles exist and carry whatever the image gave them, and no alignment has run.
-# Both starting points are covered: never given a password at all, then the image's
-# own md5 verifier.
-for r in "${ROLES[@]}"; do admin -c "alter role \"$r\" with password null;" >/dev/null 2>&1; done
-POSTGRES_PASSWORD="$CONFIGURED" admin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1
+for r in "${ROLES[@]}"; do sadmin -c "alter role \"$r\" with password null;" >/dev/null 2>&1; done
+align_as sadmin
 netok=1; for r in "${ROLES[@]}"; do login "$r" "$NETHOST" || netok=0; done
 [ "$netok" = 1 ] && ok "roles with no password at all: aligned and authenticating over the network" \
                  || bad "a never-passworded role still fails over the network"
-write_md5_verifiers
-POSTGRES_PASSWORD="$CONFIGURED" admin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1
-netok=1; for r in "${ROLES[@]}"; do login "$r" "$NETHOST" || netok=0; done
-[ "$netok" = 1 ] && ok "a fresh database authenticates over the network after one alignment" \
-                 || bad "a fresh database still fails over the network"
 echo
 
 # --- 6. empty password guard --------------------------------------------------
 echo "Guard: an empty POSTGRES_PASSWORD"
-if POSTGRES_PASSWORD="" admin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1; then
+if POSTGRES_PASSWORD="" sadmin -f "$ROOT/deploy/db/service-roles.sql" >/dev/null 2>&1; then
   bad "an empty POSTGRES_PASSWORD was accepted" "it would have blanked the service-role passwords"
 else
   ok "an empty POSTGRES_PASSWORD is refused"

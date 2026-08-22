@@ -37,22 +37,58 @@ esac
 
 DC=(docker compose --env-file "$ENV_FILE")
 SERVICE_ROLES=(authenticator supabase_auth_admin supabase_storage_admin)
+
+# THE ADMINISTRATIVE ROLE IS supabase_admin, NOT postgres.
+#
+# In the Supabase image `postgres` is an ordinary role — `rolsuper` is false — and
+# the bootstrap superuser is `supabase_admin`. The three service roles are also
+# protected as reserved roles, so altering them as `postgres` fails with
+# `"authenticator" is a reserved role, only superusers can modify it`, and even
+# reading `pg_authid` to check the stored verifier needs superuser. This is an
+# ADMINISTRATIVE path only: no service ever connects as this role, and PostgREST,
+# GoTrue and Storage keep their own roles (see docker-compose.yml).
+ADMIN_ROLE="${DB_ADMIN_ROLE:-supabase_admin}"
 FAILED=0
 ok()  { printf '    ok    %s\n' "$1"; }
 bad() { printf '    FAIL  %s\n' "$1"; FAILED=1; }
 
-# psql as the superuser, inside the db container. Output is the caller's to read.
-psql_admin() { "${DC[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U postgres -d postgres "$@"; }
+# psql as the platform superuser, inside the db container. Output is the caller's.
+psql_admin() { "${DC[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U "$ADMIN_ROLE" -d postgres "$@"; }
+# A neutral probe for questions asked BEFORE the admin role is known to be usable.
+psql_probe() { "${DC[@]}" exec -T db psql -tAq -U postgres -d postgres "$@" 2>/dev/null; }
 
 # --- wait for the database ---------------------------------------------------
 # On a cold boot after a power cut PostgreSQL replays its WAL before it accepts
 # connections, and initdb on a fresh volume takes longer still.
 for _ in $(seq 1 90); do
-  "${DC[@]}" exec -T db pg_isready -U postgres -q >/dev/null 2>&1 && break
+  "${DC[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break
   sleep 2
 done
-"${DC[@]}" exec -T db pg_isready -U postgres -q >/dev/null 2>&1 \
+"${DC[@]}" exec -T db pg_isready -q >/dev/null 2>&1 \
   || { echo "the database is not answering" >&2; exit 1; }
+
+# --- is the administrative role usable? --------------------------------------
+# Requirement, not a courtesy: everything below either alters a reserved role or
+# reads pg_authid, and both need superuser. Failing here names the problem; failing
+# later produces a permission error per role and a half-aligned database.
+echo "--- administrative role"
+ADMIN_EXISTS="$(psql_probe -c "select 1 from pg_roles where rolname = '$ADMIN_ROLE';" | tr -d '[:space:]')"
+ADMIN_SUPER="$(psql_probe -c "select rolsuper from pg_roles where rolname = '$ADMIN_ROLE';" | tr -d '[:space:]')"
+if [ "$ADMIN_EXISTS" != "1" ]; then
+  echo "    FAIL  role '$ADMIN_ROLE' does not exist in this database" >&2
+  echo "the Supabase platform superuser is missing — check the db image tag in docker-compose.yml" >&2
+  exit 1
+fi
+if [ "$ADMIN_SUPER" != "t" ]; then
+  echo "    FAIL  role '$ADMIN_ROLE' exists but is not a superuser" >&2
+  echo "the service roles are reserved; only a superuser may alter them. Refusing to continue." >&2
+  exit 1
+fi
+if ! psql_admin -tAc 'select 1' >/dev/null 2>&1; then
+  echo "    FAIL  cannot connect as '$ADMIN_ROLE'" >&2
+  exit 1
+fi
+ok "$ADMIN_ROLE is present, is a superuser, and is reachable"
 
 # --- fresh or already initialised? -------------------------------------------
 # The application's migration ledger is the marker: present means this volume has
