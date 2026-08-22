@@ -52,10 +52,59 @@ FAILED=0
 ok()  { printf '    ok    %s\n' "$1"; }
 bad() { printf '    FAIL  %s\n' "$1"; FAILED=1; }
 
-# psql as the platform superuser, inside the db container. Output is the caller's.
-psql_admin() { "${DC[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U "$ADMIN_ROLE" -d postgres "$@"; }
-# A neutral probe for questions asked BEFORE the admin role is known to be usable.
-psql_probe() { "${DC[@]}" exec -T db psql -tAq -U postgres -d postgres "$@" 2>/dev/null; }
+# HOW TO REACH THE DATABASE AS THE PLATFORM SUPERUSER.
+#
+# `psql -U supabase_admin` with no host uses the UNIX SOCKET, and the image's
+# pg_hba.conf authenticates local connections by `peer` — the operating-system user
+# must have the same name as the role. `docker compose exec` runs as the container's
+# `postgres` user, so `-U postgres` matches and succeeds while `-U supabase_admin`
+# is refused. That is the whole of `cannot connect as 'supabase_admin'`; the role is
+# fine, the path was wrong.
+#
+# The image already provides the administrative path: `host all all 127.0.0.1/32
+# trust`, inside the container. That rule is the platform's own convention for
+# post-startup administration, which is why supabase_admin ships without a password
+# — there is no credential to invent, expose or store, and nothing to weaken.
+#
+# Both paths are tried, socket first, because a different image tag may authenticate
+# local connections differently. Whichever answers is used and named in the output.
+#
+# THIS IS NOT A CREDENTIAL PATH. Loopback trust is used for ADMINISTRATION only. The
+# credential test further down still runs from a separate container over the compose
+# network and still fails closed on a loopback address — a `trust` rule must never be
+# able to report that a password works.
+ADMIN_ARGS=()
+ADMIN_PATH=""
+LOOPBACK_ARGS=(-h 127.0.0.1 -p 5432)
+
+try_conn() { # try_conn <role> <args...>
+  local role="$1"; shift
+  "${DC[@]}" exec -T db psql -tAq -U "$role" -d postgres "$@" -c 'select 1' 2>/dev/null \
+    | tr -d '[:space:]' | grep -qx 1
+}
+
+resolve_admin_path() {
+  if try_conn "$ADMIN_ROLE"; then
+    ADMIN_ARGS=(); ADMIN_PATH="unix socket"; return 0
+  fi
+  if try_conn "$ADMIN_ROLE" "${LOOPBACK_ARGS[@]}"; then
+    ADMIN_ARGS=("${LOOPBACK_ARGS[@]}"); ADMIN_PATH="loopback inside the db container"; return 0
+  fi
+  return 1
+}
+
+psql_admin() {
+  "${DC[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+    ${ADMIN_ARGS[@]+"${ADMIN_ARGS[@]}"} -U "$ADMIN_ROLE" -d postgres "$@"
+}
+
+# A neutral probe for questions asked BEFORE the admin path is known. `pg_roles` is
+# world-readable, so any role that can connect can answer them; the same two paths
+# are tried so a peer-authenticated socket is not assumed either.
+psql_probe() {
+  "${DC[@]}" exec -T db psql -tAq -U postgres -d postgres "$@" 2>/dev/null \
+    || "${DC[@]}" exec -T db psql -tAq "${LOOPBACK_ARGS[@]}" -U postgres -d postgres "$@" 2>/dev/null
+}
 
 # --- wait for the database ---------------------------------------------------
 # On a cold boot after a power cut PostgreSQL replays its WAL before it accepts
@@ -71,7 +120,7 @@ done
 # Requirement, not a courtesy: everything below either alters a reserved role or
 # reads pg_authid, and both need superuser. Failing here names the problem; failing
 # later produces a permission error per role and a half-aligned database.
-echo "--- administrative role"
+echo "--- administrative path"
 ADMIN_EXISTS="$(psql_probe -c "select 1 from pg_roles where rolname = '$ADMIN_ROLE';" | tr -d '[:space:]')"
 ADMIN_SUPER="$(psql_probe -c "select rolsuper from pg_roles where rolname = '$ADMIN_ROLE';" | tr -d '[:space:]')"
 if [ "$ADMIN_EXISTS" != "1" ]; then
@@ -84,11 +133,24 @@ if [ "$ADMIN_SUPER" != "t" ]; then
   echo "the service roles are reserved; only a superuser may alter them. Refusing to continue." >&2
   exit 1
 fi
-if ! psql_admin -tAc 'select 1' >/dev/null 2>&1; then
-  echo "    FAIL  cannot connect as '$ADMIN_ROLE'" >&2
+if ! resolve_admin_path; then
+  cat >&2 <<HINT
+    FAIL  cannot reach the database as '$ADMIN_ROLE'
+
+Tried, inside the db container:
+  * the unix socket        — refused if pg_hba authenticates local connections by
+                             \`peer\`, because docker exec runs as the OS user
+                             'postgres', which does not match this role
+  * 127.0.0.1:5432         — the image's own administrative rule
+
+No password is expected for either: '$ADMIN_ROLE' is the platform superuser and is
+reached over a local path, never over the network. If both were refused, inspect
+pg_hba.conf inside the container. Do not add a trust rule and do not substitute
+'postgres' — it is not a superuser here and may not alter the reserved service roles.
+HINT
   exit 1
 fi
-ok "$ADMIN_ROLE is present, is a superuser, and is reachable"
+ok "$ADMIN_ROLE is a superuser, reached over the $ADMIN_PATH"
 
 # --- fresh or already initialised? -------------------------------------------
 # The application's migration ledger is the marker: present means this volume has

@@ -66,20 +66,32 @@ rm -rf "$TESTDATA"; mkdir -p "$TESTDATA"; chown postgres:postgres "$TESTDATA"; c
 su postgres -c "$PGBIN/initdb -D $TESTDATA -U $ADMIN_ROLE --auth-local=trust --auth-host=trust -E UTF8 --locale=C" >/dev/null 2>&1 \
   || { echo "initdb failed" >&2; exit 1; }
 
-# Loopback trusted, the network under scram — exactly the image's shape.
+# The image's shape, rule for rule:
+#   local  peer           — the OS user must match the role name, which is why
+#                           `docker exec ... psql -U supabase_admin` is refused
+#                           while `-U postgres` succeeds
+#   127.0.0.1  trust      — the platform's administrative path
+#   the network  scram    — what the three services actually use
 cat > "$TESTDATA/pg_hba.conf" <<HBA
-local   all all                  trust
+local   all all                  peer
 host    all all 127.0.0.1/32     trust
 host    all all ${NETCIDR}       scram-sha-256
 HBA
 chown postgres:postgres "$TESTDATA/pg_hba.conf"; chmod 600 "$TESTDATA/pg_hba.conf"
 
 su postgres -c "$PGBIN/pg_ctl -D $TESTDATA -l $TESTDATA/pg.log \
-   -o '-p $TESTPORT -c listen_addresses=* -c timezone=UTC' -w start" >/dev/null 2>&1 \
+   -o '-p $TESTPORT -c listen_addresses=* -c timezone=UTC -c unix_socket_directories=$TESTDATA' -w start" >/dev/null 2>&1 \
   || { echo "could not start the test cluster; see $TESTDATA/pg.log" >&2; exit 1; }
 
+# Over loopback — the administrative path the deployment uses.
 sadmin()  { psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$TESTPORT" -U "$ADMIN_ROLE" -d postgres "$@"; }
 pgadmin() { psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$TESTPORT" -U postgres      -d postgres "$@"; }
+# Over the unix socket, AS THE OS USER `postgres` — which is what
+# `docker compose exec db psql ...` does, and the reason the old path failed.
+socket_as() { # socket_as <role>
+  su postgres -c "psql -X -q -tAc 'select 1' -h $TESTDATA -p $TESTPORT -U $1 -d postgres" \
+    >/dev/null 2>&1
+}
 
 # `postgres` as the image has it: a login role with no superuser attribute.
 sadmin -c "create role postgres login nosuperuser nocreaterole;" >/dev/null
@@ -106,7 +118,29 @@ align_as() { # align_as <sadmin|pgadmin>
   POSTGRES_PASSWORD="$CONFIGURED" "$1" -f "$ROOT/deploy/db/service-roles.sql" >"$ROOT/.cred-test.err" 2>&1
 }
 
-# --- 0. the privilege layout --------------------------------------------------
+# --- 0a. the administrative path ----------------------------------------------
+echo "Administrative path (the reported blocker)"
+if socket_as postgres; then
+  ok "the unix socket accepts -U postgres (peer matches the OS user)"
+else
+  bad "the socket refused -U postgres" "peer is not in effect; the model is wrong"
+fi
+if socket_as "$ADMIN_ROLE"; then
+  bad "the socket accepted -U $ADMIN_ROLE" "peer is not in effect; the blocker cannot be reproduced"
+else
+  ok "the unix socket REFUSES -U $ADMIN_ROLE — the reported 'cannot connect' (peer)"
+fi
+if sadmin -tAc 'select 1' >/dev/null 2>&1; then
+  ok "loopback inside the container reaches $ADMIN_ROLE — the platform's admin path"
+else
+  bad "loopback did not reach $ADMIN_ROLE" "there is no administrative path at all"
+fi
+[ "$(sadmin -tAc 'select rolpassword is null from pg_authid where rolname = current_user;' | tr -d '[:space:]')" = "t" ] \
+  && ok "$ADMIN_ROLE has NO password — nothing to invent, expose or store" \
+  || bad "$ADMIN_ROLE has a password" "the deployment must not depend on one"
+echo
+
+# --- 0b. the privilege layout -------------------------------------------------
 echo "Supabase privilege layout"
 [ "$(sadmin -tAc "select rolsuper from pg_roles where rolname='postgres';" | tr -d '[:space:]')" = "f" ] \
   && ok "postgres is NOT a superuser (as in the Supabase image)" \

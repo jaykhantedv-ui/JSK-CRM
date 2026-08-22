@@ -625,6 +625,43 @@ RLS the authorization boundary. `deploy/db-credentials.sh` verifies that the
 administrative role exists and really is a superuser before it does anything, and
 `service-roles.sql` refuses to run otherwise.
 
+#### How `supabase_admin` is reached — and why it has no password
+
+`supabase_admin` **has no password, by design**, and the deployment must not invent
+one. It is the cluster's bootstrap superuser and is reached over a **local** path
+inside the db container, never over the network.
+
+The obvious command does not work:
+
+```bash
+docker compose exec -T db psql -U supabase_admin -d postgres      # cannot connect
+docker compose exec -T db psql -U postgres       -d postgres      # works
+```
+
+With no `-h`, `psql` uses the **unix socket**, and the image authenticates local
+connections by `peer` — the operating-system user must have the same name as the
+role. `docker exec` runs as the container's `postgres` user, so `-U postgres`
+matches and `-U supabase_admin` is refused. The role is fine; the path was wrong.
+
+The image provides the path itself, as `host all all 127.0.0.1/32 trust` — loopback,
+inside the container. That is the platform's convention for post-startup
+administration, and it is why no credential exists to store or expose:
+
+```bash
+docker compose exec -T db psql -h 127.0.0.1 -U supabase_admin -d postgres
+```
+
+`deploy/db-credentials.sh` tries the socket first and falls back to loopback, so a
+future image tag that authenticates local connections differently still works, and
+it names the path it used. If both are refused it stops and says what it tried —
+**do not add a `trust` rule and do not substitute `postgres`**, which is not a
+superuser here and may not alter the reserved service roles.
+
+> Loopback `trust` is used for **administration only**. The credential test still
+> runs from a separate container over the compose network and still fails closed on
+> a loopback address: a `trust` rule must never be able to report that a password
+> works.
+
 `deploy/db/service-roles.sql` re-assigns those three passwords from
 `POSTGRES_PASSWORD`, and `deploy/db-credentials.sh` applies it and proves it worked.
 Upstream Supabase's own self-hosting compose solves it the same way.
