@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 
-import { PRIMARY_NAV, type NavItem } from '@/components/layout/nav-items'
+import { PRIMARY_NAV, SECONDARY_NAV, type NavItem } from '@/components/layout/nav-items'
 import { toRoute } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 
@@ -14,8 +14,12 @@ import { cn } from '@/lib/utils'
  * The role-gated entries arrive already filtered from the server — this component
  * renders what it is given and makes no permission decision of its own.
  */
-export function Sidebar({ secondary }: { secondary: { href: string; label: string }[] }) {
+export function Sidebar({ secondary }: { secondary: string[] }) {
   const pathname = usePathname()
+
+  // The server decided WHICH entries this role may see and sent their hrefs.
+  // The icons are looked up here because they cannot cross that boundary.
+  const secondaryItems = SECONDARY_NAV.filter((item) => secondary.includes(item.href))
 
   const link = (item: Pick<NavItem, 'href' | 'label'> & { icon?: NavItem['icon'] }) => {
     const active = pathname === item.href || pathname.startsWith(`${item.href}/`)
@@ -39,10 +43,10 @@ export function Sidebar({ secondary }: { secondary: { href: string; label: strin
   return (
     <nav aria-label="Main" className="flex flex-col gap-1 p-3">
       {PRIMARY_NAV.map(link)}
-      {secondary.length > 0 ? (
+      {secondaryItems.length > 0 ? (
         <>
           <hr className="my-2 border-border" />
-          {secondary.map((item) => link(item))}
+          {secondaryItems.map((item) => link(item))}
         </>
       ) : null}
     </nav>

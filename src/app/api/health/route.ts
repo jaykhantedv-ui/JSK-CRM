@@ -1,4 +1,4 @@
-import { supabaseAnonKey, supabaseUrl } from '@/lib/supabase/env'
+import { supabaseAnonKey, supabaseInternalUrl } from '@/lib/supabase/env'
 
 /**
  * `GET /api/health` — the liveness and readiness probe for the office server
@@ -53,7 +53,9 @@ async function probeDatabase(): Promise<Check> {
   const started = Date.now()
   try {
     const anonKey = supabaseAnonKey()
-    const response = await fetch(`${supabaseUrl()}/rest/v1/`, {
+    // The internal address: this probe runs inside the container, and the
+    // public URL is not reachable from there (see lib/supabase/env.ts).
+    const response = await fetch(`${supabaseInternalUrl()}/rest/v1/`, {
       headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}` },
       cache: 'no-store',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),

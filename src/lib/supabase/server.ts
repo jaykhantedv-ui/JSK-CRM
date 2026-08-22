@@ -4,7 +4,7 @@ import { createServerClient } from '@supabase/ssr'
 
 import type { Database } from '@/types/database.types'
 
-import { supabaseAnonKey, supabaseUrl } from './env'
+import { AUTH_COOKIE_NAME, supabaseAnonKey, supabaseInternalUrl } from './env'
 
 /**
  * Server Supabase client, using the **anon key plus the caller's session**.
@@ -17,7 +17,10 @@ import { supabaseAnonKey, supabaseUrl } from './env'
 export async function createSupabaseServerClient() {
   const cookieStore = await cookies()
 
-  return createServerClient<Database>(supabaseUrl(), supabaseAnonKey(), {
+  // The internal URL, because this runs inside the container; the pinned cookie
+  // name, so it reads the same session the browser wrote (see env.ts).
+  return createServerClient<Database>(supabaseInternalUrl(), supabaseAnonKey(), {
+    cookieOptions: { name: AUTH_COOKIE_NAME },
     cookies: {
       getAll() {
         return cookieStore.getAll()

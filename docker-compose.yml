@@ -151,7 +151,11 @@ services:
     volumes:
       - ./deploy/gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      - '127.0.0.1:${SUPABASE_PORT:-54321}:8000'
+      # The ONE origin a browser uses. It stays on the loopback interface unless
+      # PUBLISH_HOST is deliberately widened to serve a trusted office LAN; the
+      # Cloudflare tunnel never needs it widened, because it dials outward.
+      # db and app below are pinned to 127.0.0.1 and are not publishable.
+      - '${PUBLISH_HOST:-127.0.0.1}:${SUPABASE_PORT:-54321}:8000'
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8000/rest/v1/']
       interval: 30s
@@ -177,6 +181,11 @@ services:
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY}
       NEXT_PUBLIC_APP_URL: ${PUBLIC_URL}
       NEXT_PUBLIC_DEMO_MODE: ${DEMO_MODE:-0}
+      # Where SERVER-side code reaches Supabase. The public URL above is a browser
+      # address: inside this container it resolves to the container itself, or to
+      # a host port bound to 127.0.0.1 that no container can reach. Not a build
+      # arg — it must never be inlined into the browser bundle.
+      SUPABASE_INTERNAL_URL: ${SUPABASE_INTERNAL_URL:-http://gateway:8000}
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
       CRON_SECRET: ${CRON_SECRET:?CRON_SECRET is required}
       # Email is optional. Unset, the notification service does not send and the

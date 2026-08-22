@@ -75,6 +75,34 @@ function withCsp(response: NextResponse, csp: string): NextResponse {
   return response
 }
 
+/**
+ * The origin the **browser** used, rather than the one this process listens on.
+ *
+ * `request.nextUrl` carries the server's own origin — `http://localhost:3000` in a
+ * standalone build — no matter which address the request arrived at. Self-hosted
+ * that is not cosmetic: `NextResponse.redirect(request.nextUrl.clone())` sent every
+ * signed-out visitor to `http://localhost:3000/login`, an address only the server
+ * itself can resolve. Behind the Cloudflare tunnel, and on the LAN where staff
+ * reach the machine by IP, the sign-in flow dead-ended there.
+ *
+ * `Host` is set by nginx from the browser's own request, and `X-Forwarded-Proto`
+ * tells us the tunnel terminated TLS at the edge — so the pair reconstructs the
+ * address the browser is actually using. Only the ORIGIN is taken from the
+ * request; every path this function is used with is a literal below, so a forged
+ * `Host` can redirect the sender to their own host and nothing more.
+ *
+ * A relative `Location` would be simpler and is legal HTTP, but Next.js parses the
+ * header back into a URL and rejects one — hence the reconstruction.
+ */
+function requestOrigin(request: NextRequest): string {
+  const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host')
+  if (!host) return request.nextUrl.origin
+
+  const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim()
+  const proto = forwardedProto || request.nextUrl.protocol.replace(':', '') || 'http'
+  return `${proto}://${host}`
+}
+
 export async function middleware(request: NextRequest) {
   // Before `updateSession`, deliberately: there is no session to refresh and no
   // cookie to rotate on a machine-to-machine request.
@@ -116,8 +144,7 @@ export async function middleware(request: NextRequest) {
   }
 
   if (!userId && !isPublic) {
-    const redirect = request.nextUrl.clone()
-    redirect.pathname = '/login'
+    const redirect = new URL('/login', requestOrigin(request))
     // Carry the destination so a session that expired mid-task resumes where it
     // stopped rather than dumping the user on a landing page.
     redirect.searchParams.set('next', pathname)
@@ -125,10 +152,7 @@ export async function middleware(request: NextRequest) {
   }
 
   if (userId && pathname === '/login') {
-    const redirect = request.nextUrl.clone()
-    redirect.pathname = '/'
-    redirect.search = ''
-    return withCsp(NextResponse.redirect(redirect), csp)
+    return withCsp(NextResponse.redirect(new URL('/', requestOrigin(request))), csp)
   }
 
   return withCsp(response, csp)

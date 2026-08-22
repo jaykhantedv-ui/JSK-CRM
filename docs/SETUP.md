@@ -49,7 +49,8 @@ cp .env.example .env.local
 
 | Variable | Scope | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | client + server | Local: printed by `supabase start` |
+| `NEXT_PUBLIC_SUPABASE_URL` | client + server | The **browser** address. Local: printed by `supabase start` |
+| `SUPABASE_INTERNAL_URL` | **server only** | Leave unset locally — it falls back to the public URL. Set only for the self-hosted stack, where the browser address is unreachable from inside the container (ADR-034) |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client + server | RLS applies; safe to expose |
 | `SUPABASE_SERVICE_ROLE_KEY` | **server only** | **Never in a client bundle.** Three permitted callers — see §7 |
 | `DATABASE_URL` | migrations only | |

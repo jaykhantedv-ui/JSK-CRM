@@ -26,11 +26,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const user = await getCurrentUser()
   if (!user) redirect('/login')
 
-  const secondary = visibleFor(SECONDARY_NAV, user).map((item) => ({
-    href: item.href,
-    label: item.label,
-    icon: item.icon,
-  }))
+  // Only the hrefs cross into the Client Component. A NavItem's `icon` is a
+  // lucide component, and React cannot serialize a component from a Server
+  // Component into a Client one — passing the whole item threw
+  // "Functions cannot be passed directly to Client Components" once per visible
+  // entry and turned every authenticated page into a 500. The role filter stays
+  // here, on the server; the sidebar resolves the icons for the hrefs it is given.
+  const secondary = visibleFor(SECONDARY_NAV, user).map((item) => item.href)
 
   return (
     <>

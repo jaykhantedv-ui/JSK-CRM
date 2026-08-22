@@ -1653,10 +1653,11 @@ open-source Supabase components on one office server with Docker Compose:
 | `gateway` | nginx, putting the three behind one origin |
 | `app` | the Next.js application, unchanged |
 
-Nothing in `src/` changed to make this work. `NEXT_PUBLIC_SUPABASE_URL` points at
-the office server instead of `*.supabase.co`, and every server component, Server
-Action, service and policy behaves exactly as it did — because it is the same
-PostgREST, running the same migrations, enforcing the same policies.
+Almost nothing in `src/` changed to make this work: the same PostgREST runs the
+same migrations and enforces the same policies, so every service and every policy
+behaves exactly as it did. One thing did have to change, and it is recorded as
+**ADR-034** — a browser and a container do not resolve the same address, so the
+single `NEXT_PUBLIC_SUPABASE_URL` became a public/internal pair.
 
 Three substitutions were required, each replacing a **paid platform feature** with
 something the server already has:
@@ -1708,6 +1709,61 @@ server — and the hosted one is now the *optional upgrade*, not the default.
   Caddy would be a second certificate story with nothing to do (§8).
 - **Kubernetes, or a second server for HA.** Rejected outright (§3, §12). Twenty
   users on one PC with a tested restore is the correct amount of machinery.
+
+### ADR-034 — A public and an internal Supabase URL, with one pinned session cookie
+
+**Status:** Accepted
+**Date:** 2026-08-22   **Decided by:** Engineering
+
+**Context.** ADR-033 assumed one `NEXT_PUBLIC_SUPABASE_URL` could serve everyone.
+It cannot. That value is a **browser** address, and server-side code runs inside
+the `app` container, where it resolves to something else entirely: `http://localhost`
+is the container itself, and `http://<lan-ip>:54321` is a host port bound to
+`127.0.0.1` that no container can reach. Every Server Component read, Server Action,
+middleware session refresh and the container `HEALTHCHECK` went to an address that
+does not answer. The stack would have started and served nothing.
+
+**Decision.** Split the address in two, and pin the cookie that makes the split safe.
+
+- `NEXT_PUBLIC_SUPABASE_URL` stays the **browser** address. It is what the browser
+  client uses and what the CSP allows.
+- `SUPABASE_INTERNAL_URL` is the **container-internal** address of the same gateway
+  (`http://gateway:8000`). The server client, the middleware, the service-role client
+  and `/api/health` use it. It is deliberately not `NEXT_PUBLIC_`: inlined into a
+  browser bundle it would be unreachable and misleading. Unset, it falls back to the
+  public URL, so local development and hosted Supabase are unaffected.
+- `AUTH_COOKIE_NAME` pins the session cookie for **both** clients. This is not
+  cosmetic. supabase-js derives its storage key from whichever URL it was handed —
+  `sb-${hostname.split('.')[0]}-auth-token` — so the split would otherwise produce
+  `sb-localhost-auth-token` in the browser and `sb-gateway-auth-token` on the server,
+  and every user would look signed in to the browser while appearing signed out to
+  every Server Component. One literal name on both sides is what makes the split
+  work at all.
+
+nginx also gained a `/` route to the application, so the CRM and the three Supabase
+prefixes share **one origin**. That is what lets `PUBLIC_URL` and
+`PUBLIC_SUPABASE_URL` be the same value — `http://localhost` on the office LAN,
+`https://crm.<domain>` behind the tunnel — instead of demanding a second hostname
+and a second tunnel route. The upstream is resolved through Docker's embedded DNS at
+request time, because `app` depends on the gateway and a literal upstream would stop
+nginx booting whenever the application was not already up.
+
+**Consequences.** Authentication semantics are unchanged: same GoTrue, same JWTs,
+same RLS, no service-role workaround. The cookie name is a constant rather than a
+variable on purpose — the two values must be identical, and a variable is a way for
+them to drift. `tests/unit/supabase-url-split.test.ts` guards the fallback, the
+override and the pin. A deployment that ever sets `SUPABASE_INTERNAL_URL` to a
+browser-visible address gets no warning; it simply works, which is why the default in
+`docker-compose.yml` is the one correct value.
+
+**Alternatives considered.**
+- **Bind the gateway to `0.0.0.0` and use the LAN IP everywhere.** Rejected: it
+  publishes Supabase to the whole network to solve a name-resolution problem, and it
+  still fails for `http://localhost`.
+- **Use the service-role client for server-side reads.** Rejected outright — it
+  bypasses RLS, which is the authorization boundary (§15, CLAUDE.md §6).
+- **A second hostname for Supabase.** Rejected: a second tunnel route and a
+  cross-origin CSP, to avoid forty lines of nginx.
 
 ---
 

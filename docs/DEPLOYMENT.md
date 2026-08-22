@@ -540,15 +540,33 @@ backup passphrase.
 > **Print `BACKUP_PASSPHRASE` and put it in the safe.** Encrypted backups cannot
 > be read without it — by anyone, including us.
 
-Then edit `deploy/env/production.env` and set the two addresses:
+Then edit `deploy/env/production.env` and set the address. nginx serves the CRM
+and Supabase from **one origin**, so the two public values are normally identical
+(ADR-034):
 
 ```
-PUBLIC_URL=http://192.168.1.50:3000           # the server's LAN address
-PUBLIC_SUPABASE_URL=http://192.168.1.50:54321
+# This machine only — the simplest thing that works:
+PUBLIC_URL=http://localhost
+PUBLIC_SUPABASE_URL=http://localhost
+SUPABASE_PORT=80
+
+# Other machines on the office LAN — also set PUBLISH_HOST=0.0.0.0:
+# PUBLIC_URL=http://192.168.1.50
+# PUBLIC_SUPABASE_URL=http://192.168.1.50
+
+# Behind a Cloudflare tunnel — point the tunnel at http://gateway:8000:
+# PUBLIC_URL=https://crm.example.com
+# PUBLIC_SUPABASE_URL=https://crm.example.com
 ```
 
-Both must be reachable **from a staff member's browser**, not just from the
-server — the browser calls the Supabase gateway directly.
+Both are **browser** addresses: they must be reachable from a staff member's
+laptop, not merely from the server.
+
+`SUPABASE_INTERNAL_URL=http://gateway:8000` is already set in the example file and
+should be left alone. It is how server-side code reaches Supabase from inside the
+container, where the browser address does not resolve. **Do not set it to a
+browser-visible address** — server rendering and the container health check both
+depend on it.
 
 ## 10.4 Start
 

@@ -77,8 +77,14 @@ echo
 echo "Authorization boundary (§9, §24)"
 for path in /today /dashboard /accounts /settings /team /reports; do
   LOC=$(hdrs "$BASE$path" | grep -i '^location:' | tr -d '\r' | sed 's/^[Ll]ocation: *//')
+  # Next.js parses the Location header back into a URL and rejects a relative one,
+  # so middleware always answers with an absolute address. What matters is the
+  # PATH, and that the origin is the one the browser used — which is what
+  # `requestOrigin` in src/middleware.ts reconstructs from Host.
   case "$LOC" in
-    /login*) ok "$path redirects an anonymous visitor to /login" ;;
+    /login\?*|/login) ok "$path redirects an anonymous visitor to /login" ;;
+    "$BASE"/login\?*|"$BASE"/login) ok "$path redirects an anonymous visitor to /login" ;;
+    *://*/login\?*|*://*/login) ok "$path redirects an anonymous visitor to /login" ;;
     *) bad "$path redirects to /login" "Location: '${LOC:-<none>}'" ;;
   esac
 done

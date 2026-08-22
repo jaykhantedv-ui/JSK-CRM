@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 
 import { createServerClient } from '@supabase/ssr'
 
-import { supabaseAnonKey, supabaseUrl } from './env'
+import { AUTH_COOKIE_NAME, supabaseAnonKey, supabaseInternalUrl } from './env'
 
 /**
  * Session refresh at the edge (§15.8, §17.2).
@@ -38,7 +38,8 @@ export async function updateSession(
 
   let response = NextResponse.next(nextInit())
 
-  const supabase = createServerClient(supabaseUrl(), supabaseAnonKey(), {
+  const supabase = createServerClient(supabaseInternalUrl(), supabaseAnonKey(), {
+    cookieOptions: { name: AUTH_COOKIE_NAME },
     cookies: {
       getAll() {
         return request.cookies.getAll()

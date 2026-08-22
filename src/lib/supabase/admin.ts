@@ -2,7 +2,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 import type { Database } from '@/types/database.types'
 
-import { supabaseServiceRoleKey, supabaseUrl } from './env'
+import { supabaseInternalUrl, supabaseServiceRoleKey } from './env'
 
 /**
  * Service-role Supabase client. **RLS is bypassed.**
@@ -56,7 +56,10 @@ assertServerOnly()
 export function createAdminClient(): SupabaseClient<Database> {
   assertServerOnly()
 
-  return createClient<Database>(supabaseUrl(), supabaseServiceRoleKey(), {
+  // Server-only by construction, so it uses the container-internal address.
+  // No cookie name is pinned here: `persistSession: false` means this client
+  // never reads or writes a session.
+  return createClient<Database>(supabaseInternalUrl(), supabaseServiceRoleKey(), {
     auth: {
       persistSession: false,
       autoRefreshToken: false,

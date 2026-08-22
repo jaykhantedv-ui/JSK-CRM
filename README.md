@@ -6,9 +6,12 @@ desktop-oriented for management.
 
 > **Status: complete and ready for the office server.** All five master phases are built, the
 > demo/training dataset and the self-hosted deployment package are in place, and the whole suite
-> passes locally. The one thing that cannot be verified here is a running Docker stack — this
-> environment has the Docker CLI but no daemon — so the compose package is statically validated
-> and the single human step to run it is written down (ADR-033, `docs/DEPLOYMENT.md` §10).
+> passes locally. What cannot be verified in this environment is a Docker stack actually running:
+> the daemon starts, but the registry CDN is unreachable from here, so no base image can be
+> pulled. Everything short of that is verified — the build, the compose configuration in both
+> modes, the split-URL authentication path against a stand-in gateway, health, cron auth and a
+> real backup/restore round trip. The remaining step is running it on the server
+> (ADR-033, ADR-034, `docs/DEPLOYMENT.md` §10).
 
 ---
 
@@ -27,7 +30,7 @@ writing code.
 |---|---|
 | [`docs/IMPLEMENTATION_PLAN.md`](./docs/IMPLEMENTATION_PLAN.md) | 21 phases plus a Decision Gate: objective, dependencies, files, database changes, tests, acceptance criteria, risks |
 | [`docs/SPEC_AUDIT.md`](./docs/SPEC_AUDIT.md) | 53 findings against the specification — **all resolved**, each with rationale and affected phase |
-| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | The 12 resolved business decisions (`TODO-BD`), 14 ADRs, and 5 product decisions |
+| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | The 12 resolved business decisions (`TODO-BD`), 36 ADRs, and 5 product decisions |
 | [`docs/PRODUCT_REQUIREMENTS.md`](./docs/PRODUCT_REQUIREMENTS.md) | Scope, users, business rules, lifecycle, screens, dashboards |
 | [`docs/DATABASE.md`](./docs/DATABASE.md) | Eleven tables, constraints, triggers, migration order |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Stack, layering, rendering strategy, invariants |

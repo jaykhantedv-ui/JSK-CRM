@@ -203,8 +203,28 @@ non-zero row is a conversation with the owner, never a row to quietly `UPDATE`.*
 
 ## The office server (ADR-033)
 
-Everything above describes the hosted deployment. On the office PC the commands are
-these. Full instructions: [`DEPLOYMENT.md`](DEPLOYMENT.md) §10.
+Everything above describes the hosted deployment. On the office PC — or a VPS such
+as Hostinger, which behaves identically — the commands are these. Full instructions:
+[`DEPLOYMENT.md`](DEPLOYMENT.md) §10.
+
+### First run, from nothing
+
+```bash
+git clone <repo-url> /opt/jsk-crm && cd /opt/jsk-crm
+
+cp deploy/env/production.env.example deploy/env/production.env
+deploy/keygen.sh >> deploy/env/production.env   # secrets; print BACKUP_PASSPHRASE
+$EDITOR deploy/env/production.env               # set PUBLIC_URL / PUBLIC_SUPABASE_URL
+
+deploy/start.sh --build                         # LOCAL mode — no Cloudflare needed
+deploy/health.sh                                # expect HEALTHY
+scripts/smoke.sh http://localhost               # end-to-end check (the PUBLIC_URL)
+```
+
+`deploy/start.sh --tunnel` adds remote access and is the **only** thing that needs a
+Cloudflare token; without `--tunnel` nothing about the stack requires Cloudflare, and
+`--tunnel` with no token in the env file refuses before Docker is touched. Resend and
+AWS are optional everywhere: unset, digests do not send and backups stay on disk.
 
 ```bash
 cd /opt/jsk-crm

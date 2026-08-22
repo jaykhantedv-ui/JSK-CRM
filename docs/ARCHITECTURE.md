@@ -363,11 +363,23 @@ policies, and PostgREST request handling. See `/docs/SETUP.md`.
 The application is **deployment-agnostic by construction**, and that is the whole
 reason self-hosting cost nothing architecturally.
 
-Everything in `src/` talks to Supabase through `NEXT_PUBLIC_SUPABASE_URL`. Point
-that at `*.supabase.co` and it is the hosted deployment; point it at the office
-server's gateway and it is self-hosted. **Not one line under `src/` changed to
-support the office server** — same PostgREST, same migrations, same policies, same
+Everything in `src/` talks to Supabase through a base URL. Point it at
+`*.supabase.co` and it is the hosted deployment; point it at the office server's
+gateway and it is self-hosted — same PostgREST, same migrations, same policies, same
 JWT verification.
+
+Self-hosting needs **two** values rather than one, because a browser and a container
+do not resolve the same address (**ADR-034**):
+
+| | Used by | Value on the office server |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | the browser client, the CSP | `http://localhost` · `https://crm.<domain>` |
+| `SUPABASE_INTERNAL_URL` | server client, middleware, admin client, `/api/health` | `http://gateway:8000` |
+
+Both Supabase clients pin the **same** session cookie name (`AUTH_COOKIE_NAME`).
+Without that pin supabase-js would derive a different cookie name per URL and the
+server would never find the browser's session. `SUPABASE_INTERNAL_URL` falls back to
+the public URL when unset, so hosted Supabase and local development are unchanged.
 
 ```
                      ┌──────────────────────────────────┐
