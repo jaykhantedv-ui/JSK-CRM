@@ -34,6 +34,16 @@ for arg in "$@"; do
   esac
 done
 
+# The compose file cannot demand CLOUDFLARE_TUNNEL_TOKEN for itself: Compose
+# interpolates every service before it filters by profile, so a required-variable
+# marker on `tunnel` would stop the LOCAL stack from starting at all. The check
+# belongs here, on the one path that actually uses the tunnel. The value is
+# tested, never printed.
+if [ ${#PROFILES[@]} -gt 0 ] && ! grep -qE '^[[:space:]]*CLOUDFLARE_TUNNEL_TOKEN=.+' "$ENV_FILE"; then
+  echo "--tunnel needs CLOUDFLARE_TUNNEL_TOKEN set in $ENV_FILE" >&2
+  exit 1
+fi
+
 COMPOSE=(docker compose --env-file "$ENV_FILE" "${PROFILES[@]}")
 
 echo "--- starting database, auth and storage"

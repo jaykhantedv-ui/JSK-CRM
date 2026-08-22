@@ -197,7 +197,19 @@ services:
     depends_on:
       app:
         condition: service_started
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+    # The token is NOT `${...:?}`. Compose interpolates every service in the file
+    # before it applies profile filters, so a required-variable marker here fails
+    # `up`, `config`, `ps` and `down` for the LOCAL stack, which does not run the
+    # tunnel at all — the office server could not start without a Cloudflare
+    # account. deploy/start.sh --tunnel checks the token instead, which is the
+    # only path that actually needs it.
+    #
+    # It is passed as TUNNEL_TOKEN rather than on the command line: cloudflared
+    # reads that variable natively, and it keeps the credential out of the
+    # process arguments that `docker inspect` and `ps` display.
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    command: tunnel --no-autoupdate run
 
 volumes:
   db-data:
