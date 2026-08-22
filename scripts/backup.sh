@@ -65,30 +65,9 @@ pg_dump "$DATABASE_URL" \
 RAW_BYTES=$(stat -c %s "$DUMP")
 echo "--- dumped ${RAW_BYTES} bytes"
 
-# The archive must contain every business table, not merely exist.
-#
-# pg_dump can fail PART WAY and still leave a listable file behind. The way it
-# happens here is specific and worth naming: a role that is neither the table's
-# owner nor exempt from row-level security cannot COPY an RLS-protected table —
-# `query would be affected by row-level security policy for table "objects"` —
-# and pg_dump exits 1 with the file already partly written. `set -e` stops the
-# script, but a backup is the one place to check the artifact rather than trust
-# the exit code, because the cost of being wrong is discovered months later.
-#
-# Reading the table of contents is cheap and touches no data.
-MISSING=""
-for t in users outlets user_outlets accounts contacts projects project_stakeholders \
-         opportunities activities opportunity_events system_settings sales_targets \
-         import_batches import_rows; do
-  pg_restore -l "$DUMP" 2>/dev/null | grep -q "TABLE DATA public $t " || MISSING="$MISSING $t"
-done
-if [ -n "$MISSING" ]; then
-  echo "The dump is incomplete — no TABLE DATA for:$MISSING" >&2
-  echo "Refusing to publish it. If pg_dump reported a row-level security error, the" >&2
-  echo "dumping role owns neither the table nor BYPASSRLS; dump as the owner instead." >&2
-  exit 1
-fi
-echo "--- archive contains all 14 business tables"
+# One definition of "complete", shared with deploy/backup.sh.
+. "$(dirname "$0")/lib/backup-archive.sh"
+assert_archive_complete "$DUMP"
 
 # A dump smaller than this is not a backup, it is an empty database with a
 # schema. Failing loudly beats uploading it over last week's good copy.

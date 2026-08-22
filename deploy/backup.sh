@@ -48,6 +48,11 @@ echo "--- pg_dump (inside the db container)"
 
 RAW=$(stat -c %s "$WORK/$NAME.dump")
 echo "--- dumped ${RAW} bytes"
+
+# The same completeness check the off-site backup runs. This path never had it,
+# and this is the path the office server actually uses every night.
+. "$ROOT/scripts/lib/backup-archive.sh"
+assert_archive_complete "$WORK/$NAME.dump"
 # A dump this small is an empty database, not a backup. Refusing beats writing
 # it over a good copy from last night.
 [ "$RAW" -ge 4096 ] || { echo "dump is only ${RAW} bytes — refusing" >&2; exit 1; }

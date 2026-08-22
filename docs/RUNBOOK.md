@@ -106,6 +106,27 @@ and then runs `scripts/verify-restore.sql`, which fails unless the tables, the
 relationships, the settings, RLS **and its policies**, the platform schemas and
 `search_crm()` all come back.
 
+### Two wrappers, one preparation
+
+There are two restore entry points, and they do the same job for different callers:
+
+| | Used by | Talks to the database via |
+|---|---|---|
+| `scripts/restore.sh` | the off-site copy, CI, a laptop | `RESTORE_DATABASE_URL` |
+| `deploy/restore.sh` | **the office server**, and `deploy/backup.sh --verify` | `docker compose exec db` |
+
+Both run **`scripts/restore-prepare.sql`** and both verify with
+**`scripts/verify-restore.sql`**. That is deliberate and it matters: `deploy/`
+previously kept its own copy of the preparation, so a fix to `scripts/` never
+reached the path the server actually runs every night, and the drill kept failing
+with `schema "storage" does not exist` after the fix was already in the repository.
+If you change what a restore needs, change `scripts/restore-prepare.sql` — nothing
+else has a list.
+
+The same applies to the two backup entry points: `scripts/backup.sh` and
+`deploy/backup.sh` both source `scripts/lib/backup-archive.sh`, which owns the list
+of business tables an archive must contain before it may be published.
+
 ### What the target has to have before pg_restore runs
 
 The archive is schema-filtered and `pg_dump` never dumps roles, so three things the

@@ -1939,6 +1939,20 @@ the preparation. What changes is that an *incomplete* archive, or a target that 
 never run Supabase, now restores correctly instead of producing a database that
 looks right. The backup format and the encryption are untouched.
 
+**Follow-up, same day.** The fix above went into `scripts/restore.sh` and the
+office server kept failing with the same error. There are **two** restore wrappers —
+`scripts/restore.sh` for the off-site copy and `deploy/restore.sh` for the server,
+which is what `deploy/backup.sh --verify` calls — and `deploy/` carried its own copy
+of the preparation, still extensions-only. One list in two files meant fixing one of
+them. Both now execute `scripts/restore-prepare.sql`, piped into the container so
+nothing changes in `docker-compose.yml`; both backup wrappers likewise source
+`scripts/lib/backup-archive.sh` for the completeness check, and both restore
+wrappers share `deploy/lib/db-admin.sh` for the superuser path, because
+`deploy/restore.sh` was administering as `postgres` — which cannot create the
+platform roles the preparation needs. `deploy/restore.sh` also *counted*
+pg_restore's errors and carried on; it now stops on them. The drill exercises both
+wrappers, so a future divergence fails a test rather than a deployment.
+
 **Alternatives considered.**
 - **Dump the whole database instead of three schemas.** Rejected: it drags in the
   platform's own catalogs and makes the archive dependent on the image version,

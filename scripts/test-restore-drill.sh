@@ -39,9 +39,15 @@ PASS=0; FAIL=0
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  \033[31mFAIL\033[0m  %s\n     %s\n' "$1" "${2:-}"; FAIL=$((FAIL+1)); }
 
+SHAPED=${SHAPED:-/var/lib/jsk-drill-shaped}
+SHAPEDPORT=${SHAPEDPORT:-54396}
+PROD_ENV="$ROOT/deploy/env/production.env"
 cleanup() {
-  su postgres -c "$PGBIN/pg_ctl -D $BARE -w -s -m immediate stop" >/dev/null 2>&1 || true
-  rm -rf "$BARE" "$WORK"
+  su postgres -c "$PGBIN/pg_ctl -D $BARE   -w -s -m immediate stop" >/dev/null 2>&1 || true
+  su postgres -c "$PGBIN/pg_ctl -D $SHAPED -w -s -m immediate stop" >/dev/null 2>&1 || true
+  rm -rf "$BARE" "$SHAPED" "$WORK"
+  # The temporary env file this test writes is never left behind.
+  [ -f "$PROD_ENV.drillbak" ] && mv -f "$PROD_ENV.drillbak" "$PROD_ENV" || rm -f "$PROD_ENV"
 }
 trap cleanup EXIT
 
@@ -141,6 +147,114 @@ for cycle in $(seq 1 "$CYCLES"); do
     && ok "RLS enabled on every restored table" || bad "a restored table has RLS off"
   echo
 done
+
+# --- the production path: deploy/backup.sh --verify ---------------------------
+#
+# scripts/restore.sh and deploy/restore.sh are two different wrappers around the
+# same job, and the office server uses the SECOND one. It kept its own copy of the
+# preparation — extensions only — so every fix to the first missed it entirely.
+# This runs the production wrapper for real.
+#
+# Containers cannot be started here (the registry is unreachable), so only the
+# TRANSPORT is substituted: a shim on PATH turns `docker compose exec -T db <cmd>`
+# into that command against a local cluster. Everything else — deploy/backup.sh,
+# deploy/restore.sh, the shared preparation, the verification — is the real script.
+echo "The production path: deploy/backup.sh --verify"
+
+# A cluster shaped like the image: supabase_admin is the bootstrap superuser and
+# `postgres` is an ordinary role, so the administrative path is exercised too.
+su postgres -c "$PGBIN/pg_ctl -D $SHAPED -w -s -m immediate stop" >/dev/null 2>&1 || true
+rm -rf "$SHAPED"; mkdir -p "$SHAPED"; chown postgres:postgres "$SHAPED"; chmod 700 "$SHAPED"
+su postgres -c "$PGBIN/initdb -D $SHAPED -U supabase_admin --auth-local=trust --auth-host=trust -E UTF8 --locale=C" >/dev/null 2>&1
+printf 'local all all trust\nhost all all 127.0.0.1/32 trust\n' > "$SHAPED/pg_hba.conf"
+chown postgres:postgres "$SHAPED/pg_hba.conf"; chmod 600 "$SHAPED/pg_hba.conf"
+su postgres -c "$PGBIN/pg_ctl -D $SHAPED -l $SHAPED/pg.log \
+   -o '-p $SHAPEDPORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=$SHAPED' -w start" >/dev/null 2>&1 \
+  || { bad "could not start the shaped cluster"; SHAPED_UP=0; }
+SHAPED_UP=${SHAPED_UP:-1}
+
+if [ "$SHAPED_UP" = "1" ]; then
+  SH_ADMIN="postgresql://supabase_admin@127.0.0.1:$SHAPEDPORT/postgres"
+  psql "$SH_ADMIN" -q -c "create role postgres login nosuperuser createdb;" >/dev/null 2>&1
+  # Give it a live CRM to back up, restored from the same source the cycles used.
+  #
+  # Restored AS `postgres`, deliberately: on the office server the migrations are
+  # applied by that role, so it owns the CRM tables. Ownership is what lets it dump
+  # them — a role that owns neither the table nor BYPASSRLS cannot COPY an
+  # RLS-protected one, and every table here has RLS. Seeding as the superuser would
+  # have produced a database the production backup could not read, which is a
+  # different bug from the one under test.
+  psql "$SH_ADMIN" -v ON_ERROR_STOP=1 -q -f "$ROOT/scripts/restore-prepare.sql" >/dev/null 2>&1
+  psql "$SH_ADMIN" -q -c "alter schema public owner to postgres;" \
+                   -c "grant create, connect on database postgres to postgres;" \
+                   -c "grant pg_read_all_data to postgres;" >/dev/null 2>&1
+  pg_dump "$SOURCE_DATABASE_URL" --format=custom --no-owner --no-privileges \
+    --schema=public --schema=auth --schema=storage --file="$WORK/live.dump" 2>/dev/null
+  pg_restore --dbname "postgresql://postgres@127.0.0.1:$SHAPEDPORT/postgres" \
+    --clean --if-exists --no-owner --no-privileges "$WORK/live.dump" >/dev/null 2>&1
+  [ "$(psql "$SH_ADMIN" -tAq -c "select count(*) from pg_tables where schemaname='public';" | tr -d ' ')" = "$SRC_TABLES" ] \
+    && ok "a live CRM database exists on the shaped cluster" || bad "could not seed the shaped cluster"
+
+  # The transport shim.
+  mkdir -p "$WORK/bin"
+  cat > "$WORK/bin/docker" <<SHIM
+#!/usr/bin/env bash
+# Translates 'docker compose [--env-file X] exec -T db <cmd> <args>' into <cmd>
+# against 127.0.0.1:$SHAPEDPORT. Everything else is a no-op success.
+args=(); seen_exec=0; cmd=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    compose|-T|db) shift ;;
+    --env-file) shift 2 ;;
+    exec) seen_exec=1; shift ;;
+    stop|start|ps) exit 0 ;;
+    *) if [ "\$seen_exec" = 1 ] && [ -z "\$cmd" ]; then cmd="\$1"; else args+=("\$1"); fi; shift ;;
+  esac
+done
+[ -n "\$cmd" ] || exit 0
+# Drop any -h/-p the caller chose; this cluster is reached one way.
+final=(); i=0
+while [ \$i -lt \${#args[@]} ]; do
+  case "\${args[\$i]}" in
+    -h|-p) i=\$((i+2)); continue ;;
+    *) final+=("\${args[\$i]}"); i=\$((i+1)) ;;
+  esac
+done
+exec "\$cmd" -h 127.0.0.1 -p $SHAPEDPORT "\${final[@]}"
+SHIM
+  chmod +x "$WORK/bin/docker"
+
+  # A temporary production.env, removed on exit. There is no real one to disturb.
+  [ -f "$PROD_ENV" ] && mv -f "$PROD_ENV" "$PROD_ENV.drillbak"
+  mkdir -p "$(dirname "$PROD_ENV")" "$WORK/backups"
+  {
+    echo "POSTGRES_PASSWORD=drill-not-a-real-password"
+    echo "BACKUP_PASSPHRASE=$(openssl rand -hex 24)"
+    echo "BACKUP_DIR=$WORK/backups"
+    echo "BACKUP_RETENTION_DAYS=30"
+  } > "$PROD_ENV"
+  chmod 600 "$PROD_ENV"
+
+  PATH="$WORK/bin:$PATH" "$ROOT/deploy/backup.sh" --verify >"$WORK/verify.log" 2>&1
+  VSTATUS=$?
+  [ "$VSTATUS" = "0" ] && ok "deploy/backup.sh --verify completed" \
+                       || bad "deploy/backup.sh --verify failed" "$(grep -iE 'error|refus|FATAL' "$WORK/verify.log" | head -1)"
+  grep -q "preparing .* (platform roles, schemas, extensions)" "$WORK/verify.log" \
+    && ok "it used the SHARED preparation, not the old extensions-only copy" \
+    || bad "it did not run the shared preparation" "the wrappers have diverged again"
+  grep -q "archive contains all 14 business tables" "$WORK/verify.log" \
+    && ok "the production backup checks archive completeness too" || bad "no completeness check on the production path"
+  grep -q "pg_restore exit=0, 0 error line(s)" "$WORK/verify.log" \
+    && ok "pg_restore: exit 0, zero diagnostics" || bad "pg_restore reported errors" "$(grep 'pg_restore exit' "$WORK/verify.log" | head -1)"
+  for n in "all 14 business tables present" "policies restored" "public, auth, storage and extensions all present" "search_crm() executes"; do
+    grep -q "$n" "$WORK/verify.log" && ok "verification: $n" || bad "verification missing: $n"
+  done
+  grep -q "RESTORE VERIFIED" "$WORK/verify.log" \
+    && ok "the backup is reported verified" || bad "no RESTORE VERIFIED line"
+  [ "$(psql "$SH_ADMIN" -tAq -c "select count(*) from pg_database where datname like 'jsk_restore_check_%';" | tr -d ' ')" = "0" ] \
+    && ok "the scratch database was dropped afterwards" || bad "a scratch database was left behind"
+fi
+echo
 
 # --- the production guard still holds -----------------------------------------
 echo "Production safety"
