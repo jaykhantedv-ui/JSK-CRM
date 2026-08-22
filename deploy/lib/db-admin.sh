@@ -113,6 +113,56 @@ file_in_cleanup() {
   "${DC[@]}" exec -T db rm -f "${CONTAINER_TMP}.restore" >/dev/null 2>&1 || true
 }
 
+# INSPECTING A BACKUP ARCHIVE WITHOUT CLIENT TOOLS ON THE HOST.
+#
+# Reading a custom-format archive needs `pg_restore`, and the office server has no
+# PostgreSQL client tools installed — nor should it need them, when a container
+# with the exact matching version is already running. Calling pg_restore on the
+# host exits 127, `command not found`, immediately after the dump: a good archive
+# refused because the validator could not open it.
+#
+# The archive goes in as a FILE and the table of contents comes back as a FILE.
+# Nothing binary and nothing large crosses the exec stream in either direction —
+# that stream is what truncated a dump once already. Only `sh -c` and its exit
+# status do.
+#
+# scripts/lib/backup-archive.sh owns the three-way diagnosis and the fourteen-table
+# check; this provides only the transport, so both backup entry points share one
+# validator.
+ARCHIVE_INSPECT=container
+
+# archive_inspect_container <archive> <toc-out> <err-out>
+#   0 readable and decodes · 1 unreadable · 2 lists but will not decode
+#   3 cannot inspect at all
+archive_inspect_container() {
+  local archive="$1" toc_out="$2" err_out="$3"
+  local inside="${CONTAINER_TMP}.archive"
+  local toc="${inside}.toc" err="${inside}.err"
+  local rc=0
+
+  : > "$toc_out"; : > "$err_out"
+
+  if ! "${DC[@]}" cp "$archive" "db:$inside" >/dev/null 2>&1; then
+    echo "could not copy the archive into the db container" > "$err_out"
+    return 3
+  fi
+
+  if "${DC[@]}" exec -T db sh -c 'pg_restore -l "$1" > "$2" 2> "$3"' _ "$inside" "$toc" "$err"; then
+    "${DC[@]}" cp "db:$toc" "$toc_out" >/dev/null 2>&1 || rc=1
+    if [ "$rc" = 0 ]; then
+      "${DC[@]}" exec -T db sh -c 'pg_restore -f /dev/null "$1" 2> "$2"' _ "$inside" "$err" || rc=2
+    fi
+  else
+    rc=1
+  fi
+
+  [ "$rc" = 0 ] || "${DC[@]}" cp "db:$err" "$err_out" >/dev/null 2>&1 || true
+
+  # Whatever happened, leave nothing behind in the container.
+  "${DC[@]}" exec -T db rm -f "$inside" "$toc" "$err" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
 # A neutral probe for questions asked BEFORE the admin path is known. `pg_roles` is
 # world-readable, so any role that can connect can answer them; the same two paths
 # are tried so a peer-authenticated socket is not assumed either.

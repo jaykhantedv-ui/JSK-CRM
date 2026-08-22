@@ -7,9 +7,14 @@
 # `docker compose exec -T db <cmd>` and `docker compose cp` are turned into local
 # equivalents. Both tests need it, so it lives in one file.
 
-# write_compose_shim <bin-directory> <postgres-port>
+# write_compose_shim <bin-directory> <postgres-port> [postgres-bin-directory]
+#
+# The emulated container resolves its binaries through the third argument when it
+# is given. That matters for the no-client-tools test: the HOST must be able to
+# lack pg_restore on PATH while the stand-in container still has it, which is
+# exactly the office server's situation.
 write_compose_shim() {
-  local dir="$1" port="$2"
+  local dir="$1" port="$2" pgbin="${3:-}"
   mkdir -p "$dir"
   cat > "$dir/docker" <<SHIM
 #!/usr/bin/env bash
@@ -43,8 +48,10 @@ case "\$cmd" in
         *) final+=("\${args[\$i]}"); i=\$((i+1)) ;;
       esac
     done
+    [ -n "${pgbin}" ] && export PATH="${pgbin}:\$PATH"
     exec "\$cmd" -h 127.0.0.1 -p ${port} \${final[@]+"\${final[@]}"} ;;
-  *) exec "\$cmd" \${args[@]+"\${args[@]}"} ;;
+  *) [ -n "${pgbin}" ] && export PATH="${pgbin}:\$PATH"
+     exec "\$cmd" \${args[@]+"\${args[@]}"} ;;
 esac
 SHIM
   chmod +x "$dir/docker"

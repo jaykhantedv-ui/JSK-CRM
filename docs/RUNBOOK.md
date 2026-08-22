@@ -138,6 +138,23 @@ the backup, an administrative operation, uses an administrative role.
 administrative role too. If you do not, the guard refuses the archive rather than
 publishing an empty one.
 
+### The office server needs no PostgreSQL client tools
+
+Reading a custom-format archive needs `pg_restore`, and the server has none
+installed — nor should it, when a container with the exact matching version is
+already running. The validator used to call `pg_restore` on the host and exited
+**127, `command not found`**, immediately after the dump: a healthy archive
+refused because nothing could open it.
+
+`deploy/backup.sh` now inspects **inside the db container**. The archive goes in as
+a file, the table of contents comes back as a file, and only `sh -c` and an exit
+status cross the exec stream. `scripts/backup.sh` still uses whatever `pg_restore`
+is on the machine it runs on, which is right for CI and a laptop; if there is none
+it now says so by name instead of exiting 127.
+
+The three-way diagnosis and the fourteen-table check are shared — one validator,
+two transports (`ARCHIVE_INSPECT=host|container`).
+
 ### The dump is copied out as a file, never piped
 
 `docker compose exec` multiplexes stdout, and a custom-format dump is large and

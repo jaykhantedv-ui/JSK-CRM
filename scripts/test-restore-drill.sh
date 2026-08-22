@@ -238,7 +238,25 @@ if [ "$SHAPED_UP" = "1" ]; then
   # The transport shim.
   # The transport stand-in, shared with scripts/test-migrations.sh.
   . "$ROOT/scripts/lib/compose-shim.sh"
-  write_compose_shim "$WORK/bin" "$SHAPEDPORT"
+  write_compose_shim "$WORK/bin" "$SHAPEDPORT" "$PGBIN"
+
+  # THE OFFICE SERVER HAS NO POSTGRESQL CLIENT TOOLS. The validator used to call
+  # pg_restore on the host and exited 127 the moment the dump finished — a healthy
+  # archive refused because nothing could open it.
+  #
+  # A recording stand-in goes FIRST on PATH. If deploy/backup.sh --verify touches a
+  # host pg_restore at all, this file appears; the emulated container resolves the
+  # real binary by absolute path, exactly as the real container has its own.
+  mkdir -p "$WORK/nopg"
+  cat > "$WORK/nopg/pg_restore" <<'NOPG'
+#!/bin/sh
+echo called >> "$HOSTPG_MARKER"
+echo "pg_restore: command not found" >&2
+exit 127
+NOPG
+  chmod +x "$WORK/nopg/pg_restore"
+  export HOSTPG_MARKER="$WORK/hostpg.called"
+  rm -f "$HOSTPG_MARKER"
 
   # A temporary production.env, removed on exit. There is no real one to disturb.
   [ -f "$PROD_ENV" ] && mv -f "$PROD_ENV" "$PROD_ENV.drillbak"
@@ -251,7 +269,7 @@ if [ "$SHAPED_UP" = "1" ]; then
   } > "$PROD_ENV"
   chmod 600 "$PROD_ENV"
 
-  PATH="$WORK/bin:$PATH" "$ROOT/deploy/backup.sh" --verify >"$WORK/verify.log" 2>&1
+  PATH="$WORK/nopg:$WORK/bin:$PATH" "$ROOT/deploy/backup.sh" --verify >"$WORK/verify.log" 2>&1
   VSTATUS=$?
   [ "$VSTATUS" = "0" ] && ok "deploy/backup.sh --verify completed" \
                        || { bad "deploy/backup.sh --verify failed" "$(grep -iE 'error|refus|FATAL' "$WORK/verify.log" | head -1)"
@@ -276,6 +294,23 @@ if [ "$SHAPED_UP" = "1" ]; then
     && ok "the backup is reported verified" || bad "no RESTORE VERIFIED line"
   [ "$(psql "$SH_ADMIN" -tAq -c "select count(*) from pg_database where datname like 'jsk_restore_check_%';" | tr -d ' ')" = "0" ] \
     && ok "the scratch database was dropped afterwards" || bad "a scratch database was left behind"
+
+  # --- the host needs no PostgreSQL client tools -------------------------------
+  [ ! -f "$HOSTPG_MARKER" ] \
+    && ok "the host's pg_restore was never invoked — validation ran in the container" \
+    || bad "deploy/backup.sh used a host pg_restore" "$(wc -l < "$HOSTPG_MARKER") call(s)"
+  grep -q "archive contains all 14 business tables and decodes cleanly" "$WORK/verify.log" \
+    && ok "and the archive still validated: all 14 tables, decoded" \
+    || bad "validation did not complete in the container"
+
+  # And the host path still reports missing client tools clearly rather than 127.
+  HOSTMSG="$(/bin/bash -c 'PATH=/nonexistent-for-this-check
+      . "'"$ROOT"'/scripts/lib/backup-archive.sh"
+      archive_inspect_host /dev/null /dev/null /dev/stdout; echo "status=$?"' 2>&1)"
+  case "$HOSTMSG" in
+    *"not installed on this host"*status=3*) ok "on a host without pg_restore the host path says so, not exit 127" ;;
+    *) bad "the host path did not report missing client tools" "said: ${HOSTMSG:-nothing}" ;;
+  esac
 fi
 echo
 
