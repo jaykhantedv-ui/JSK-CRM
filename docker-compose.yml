@@ -46,6 +46,13 @@ services:
       POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     volumes:
       - db-data:/var/lib/postgresql/data
+      # Read-only, and NOT an initdb hook. The image creates authenticator,
+      # supabase_auth_admin and supabase_storage_admin with its own passwords,
+      # while POSTGRES_PASSWORD reaches only the `postgres` superuser — so the
+      # three service connection strings below would be refused. deploy/start.sh
+      # applies this once the database is up, before those services start, which
+      # works the same on a fresh volume and on one that already holds data.
+      - ./deploy/db/service-roles.sql:/etc/jsk/service-roles.sql:ro
     ports:
       - '127.0.0.1:${POSTGRES_PORT:-54322}:5432'
     healthcheck:

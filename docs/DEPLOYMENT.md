@@ -574,15 +574,54 @@ depend on it.
 deploy/start.sh --build
 ```
 
-That brings up the database, waits for auth and storage to create their schemas,
-applies all migrations, then starts the gateway and the application. It is safe to
+That brings the database up **on its own first**, aligns the service-role
+credentials (below), then waits for auth and storage to create their schemas,
+applies all migrations, and starts the gateway and the application. It is safe to
 re-run.
 
 Check it:
 
 ```bash
 deploy/health.sh
+deploy/db-credentials.sh --test    # the three roles and the three services
 ```
+
+### Why the database credentials need a step of their own
+
+`POSTGRES_PASSWORD` is **not** the password of the roles the Supabase services use.
+The `supabase/postgres` image creates `authenticator`, `supabase_auth_admin` and
+`supabase_storage_admin` during initdb with its own built-in passwords, and the
+entrypoint applies `POSTGRES_PASSWORD` to the `postgres` **superuser** and to
+nothing else. `docker-compose.yml` builds all three service connection strings from
+`POSTGRES_PASSWORD`, so until those role passwords are re-assigned the services are
+handed a password the database never gave their role:
+
+```
+FATAL: password authentication failed for user "supabase_auth_admin"
+FATAL: password authentication failed for user "authenticator"
+FATAL: password authentication failed for user "supabase_storage_admin"
+```
+
+The database looks **healthy** the whole time, because `pg_isready` and every
+`psql -U postgres` check speak as the superuser whose password *is* set. That is
+what makes this failure confusing: `docker compose ps` shows a healthy `db` and
+three services restart-looping.
+
+`deploy/db/service-roles.sql` re-assigns those three passwords from
+`POSTGRES_PASSWORD`, and `deploy/db-credentials.sh` applies it and proves it worked.
+Upstream Supabase's own self-hosting compose solves it the same way.
+
+- It runs **before** auth, rest and storage start, so they never see a wrong password.
+- It is **idempotent and data-safe**: re-assigning a role password touches no table,
+  no schema and no policy, so it runs on every start.
+- It says which case it found — *fresh database (first initialisation)* or *existing
+  database (already initialised)* — so a first boot and a restart are never confused.
+- It **only ever `ALTER`s**. Creating a platform role with the wrong grants would be
+  worse than failing, so a role the image did not create is reported, not invented.
+
+To change `POSTGRES_PASSWORD` on a running deployment: edit
+`deploy/env/production.env`, then `deploy/start.sh`. The alignment step re-assigns
+the roles to the new value before the services restart.
 
 ## 10.5 Start automatically on boot
 

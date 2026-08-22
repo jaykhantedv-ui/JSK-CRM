@@ -1765,6 +1765,61 @@ browser-visible address gets no warning; it simply works, which is why the defau
 - **A second hostname for Supabase.** Rejected: a second tunnel route and a
   cross-origin CSP, to avoid forty lines of nginx.
 
+### ADR-035 — Service-role passwords are aligned at start, not at initdb
+
+**Status:** Accepted
+**Date:** 2026-08-22   **Decided by:** Engineering
+
+**Context.** The first run on the office server built every image, reported a healthy
+`db`, and served nothing: GoTrue, PostgREST and storage-api each failed with
+`password authentication failed`. `POSTGRES_PASSWORD` is applied by the postgres
+entrypoint to the `postgres` superuser alone, while `supabase/postgres` creates
+`authenticator`, `supabase_auth_admin` and `supabase_storage_admin` at initdb with
+its own passwords. `docker-compose.yml` built all three connection strings from
+`POSTGRES_PASSWORD`, so nothing in the package ever made the two agree. The health
+check could not see it: `pg_isready` speaks as the superuser, whose password is set.
+
+`supabase/platform/000_supabase_platform.sql` creates the same role names without
+passwords, but it is local-development and CI only (ADR-018) and never runs on the
+server — so it neither caused nor could have fixed this.
+
+**Decision.** Align the three passwords from `POSTGRES_PASSWORD` as an explicit
+startup step, in `deploy/db/service-roles.sql`, applied by `deploy/db-credentials.sh`
+while only `db` is running — before auth, rest and storage start.
+
+Not an initdb hook. A `/docker-entrypoint-initdb.d` script runs only on an empty
+volume, which would fix a fresh deployment and leave every existing one broken, and
+it depends on how a particular image's entrypoint walks that directory. An explicit
+step runs identically on both, is idempotent, and can be re-run by hand.
+
+Not a role we create. The script only `ALTER`s. These roles belong to the platform;
+inventing one with guessed grants would replace an obvious failure with a subtle
+privilege bug, so a missing role is reported and the deployment stops.
+
+**Consequences.** `deploy/start.sh` now starts `db` alone, aligns, then starts the
+rest. Changing `POSTGRES_PASSWORD` is just an edit plus `deploy/start.sh`. Nothing
+about authentication *semantics* changed — same GoTrue, same JWTs, same RLS, same
+`AUTH_COOKIE_NAME`, same public/internal URL split (ADR-034). No schema, migration,
+policy or business rule is touched; re-assigning a role password is not a data
+change, which is why it is safe on a database that already holds the business.
+
+`scripts/test-service-credentials.sh` is the regression test. It recreates the exact
+starting state on a real PostgreSQL server, proves all three roles are refused, runs
+the alignment, and proves they are accepted — so the fix is provable without pulling
+a single container image. It temporarily requires `scram-sha-256` on loopback,
+because the development cluster trusts it and under `trust` a password test proves
+nothing; it refuses to run at all if that switch does not take effect.
+
+**Alternatives considered.**
+- **Mount `roles.sql` as an initdb hook**, as upstream's compose does. Rejected as
+  the only mechanism: it cannot repair a volume that already exists.
+- **Give each service its own password.** Rejected: three more secrets in
+  `production.env` for a single-tenant server, and `keygen.sh` output to match.
+- **Let the services connect as `postgres`.** Rejected outright. PostgREST connects
+  as `authenticator` precisely so it can switch to the caller's role — RLS is the
+  authorization boundary (§15, CLAUDE.md §6), and a superuser connection would
+  bypass every policy in the database.
+
 ---
 
 ## How to record a decision

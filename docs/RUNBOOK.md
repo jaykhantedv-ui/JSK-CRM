@@ -198,6 +198,7 @@ non-zero row is a conversation with the owner, never a row to quietly `UPDATE`.*
 | A screen is slow | `/docs/DEPLOYMENT.md` §7A, then EXPLAIN the query as the affected role — RLS cost is invisible when you test as `postgres` |
 | A file will not upload | Over 10 MB, or the magic bytes do not match the extension. Both are deliberate refusals |
 | A bad import landed | Roll the batch back from `/import` while it is still eligible. Rollback refuses after a legitimate edit, on purpose |
+| `password authentication failed for user "authenticator"` / `"supabase_auth_admin"` / `"supabase_storage_admin"` — while `db` is healthy | The service-role passwords are not the superuser's. Run `deploy/db-credentials.sh`, then `deploy/start.sh`. See `DEPLOYMENT.md` §10.4 |
 
 ---
 

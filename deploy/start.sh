@@ -46,12 +46,21 @@ fi
 
 COMPOSE=(docker compose --env-file "$ENV_FILE" "${PROFILES[@]}")
 
-echo "--- starting database, auth and storage"
+echo "--- starting the database"
+# The database comes up ALONE first. GoTrue, PostgREST and Storage authenticate as
+# roles whose passwords the image sets to its own values, not to POSTGRES_PASSWORD,
+# so they must not be started until those passwords have been aligned — otherwise
+# all three restart-loop on "password authentication failed" while `db` reports
+# healthy. See deploy/db/service-roles.sql.
+"${COMPOSE[@]}" up -d --wait db
+"$ROOT/deploy/db-credentials.sh"
+
+echo "--- starting auth, storage and the data API"
 # The application migrations reference auth.users and storage.buckets, so GoTrue
 # and Storage must have run their own migrations BEFORE ours are applied. Waiting
 # on their health checks is what guarantees that ordering; starting everything at
 # once would race and fail on a first boot roughly half the time.
-"${COMPOSE[@]}" up -d --wait db auth storage rest
+"${COMPOSE[@]}" up -d --wait auth storage rest
 
 echo "--- applying migrations"
 "$ROOT/deploy/migrate.sh"
@@ -67,3 +76,9 @@ echo
 echo
 echo "--- health"
 "$ROOT/deploy/health.sh" || true
+
+echo
+# The deployment regression check: the three service roles authenticate and all
+# three services are actually talking to PostgreSQL. This is the failure that let
+# a stack build cleanly, report a healthy database and serve nothing.
+"$ROOT/deploy/db-credentials.sh" --test
