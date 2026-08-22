@@ -9,6 +9,12 @@ npm-debug.log*
 .env
 .env.*
 !.env.example
+# `.env*` above only matches the context root. deploy/env/production.env holds
+# the database password, the JWT secret, the service-role key and the backup
+# passphrase, and `COPY . .` in the builder stage would otherwise carry it into
+# an image layer.
+deploy/env/*.env
+!deploy/env/*.env.example
 
 # Not needed to build or run the application.
 tests
