@@ -218,32 +218,62 @@ if [ "$SHAPED_UP" = "1" ]; then
     && ok "as $ADMIN_LABEL: the archive carries all 14 business tables" \
     || bad "as $ADMIN_LABEL: the archive is still incomplete"
 
+  # --- a TRUNCATED archive must be diagnosed as transport, not as permissions ---
+  #
+  # The office server's dump arrived at 95,811 bytes. A custom archive keeps its
+  # table of contents at the end, so `pg_restore -l` failed and the checker — which
+  # looked for per-table entries first — reported every business table missing and
+  # blamed the dumping role. The byte count was the giveaway: a schema-only dump of
+  # this database is 212 KB, so 95 KB was never schema-only, it was cut off.
+  head -c 95811 "$WORK/asadmin.dump" > "$WORK/trunc.dump"
+  TRUNC_MSG="$(assert_archive_complete "$WORK/trunc.dump" 2>&1 >/dev/null | head -1)"
+  case "$TRUNC_MSG" in
+    *"truncated or corrupt"*) ok "a truncated archive is diagnosed as a TRANSPORT fault" ;;
+    *) bad "a truncated archive was misdiagnosed" "said: ${TRUNC_MSG:-nothing}" ;;
+  esac
+  assert_archive_complete "$WORK/trunc.dump" >/dev/null 2>&1 \
+    && bad "the guard accepted a truncated archive" \
+    || ok "and it is refused, so no artifact would be published"
+
   # The transport shim.
   mkdir -p "$WORK/bin"
   cat > "$WORK/bin/docker" <<SHIM
 #!/usr/bin/env bash
-# Translates 'docker compose [--env-file X] exec -T db <cmd> <args>' into <cmd>
-# against 127.0.0.1:$SHAPEDPORT. Everything else is a no-op success.
-args=(); seen_exec=0; cmd=""
+# Translates the compose calls the deploy scripts make into local equivalents:
+#   compose exec -T db <cmd> <args>   -> <cmd> against 127.0.0.1:$SHAPEDPORT
+#   compose cp db:<src> <dest>        -> cp <src> <dest>
+#   compose cp <src> db:<dest>        -> cp <src> <dest>
+# Everything else is a no-op success.
+args=(); seen_exec=0; seen_cp=0; cmd=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
-    compose|-T|db) shift ;;
+    compose|-T) shift ;;
     --env-file) shift 2 ;;
     exec) seen_exec=1; shift ;;
+    cp) seen_cp=1; shift ;;
     stop|start|ps) exit 0 ;;
+    db) if [ "\$seen_cp" = 1 ]; then args+=("\$1"); fi; shift ;;
     *) if [ "\$seen_exec" = 1 ] && [ -z "\$cmd" ]; then cmd="\$1"; else args+=("\$1"); fi; shift ;;
   esac
 done
+if [ "\$seen_cp" = 1 ]; then
+  # Strip the db: prefix from whichever side carries it; both sides are local here.
+  src="\${args[0]#db:}"; dst="\${args[1]#db:}"
+  exec cp -f "\$src" "\$dst"
+fi
 [ -n "\$cmd" ] || exit 0
-# Drop any -h/-p the caller chose; this cluster is reached one way.
-final=(); i=0
-while [ \$i -lt \${#args[@]} ]; do
-  case "\${args[\$i]}" in
-    -h|-p) i=\$((i+2)); continue ;;
-    *) final+=("\${args[\$i]}"); i=\$((i+1)) ;;
-  esac
-done
-exec "\$cmd" -h 127.0.0.1 -p $SHAPEDPORT "\${final[@]}"
+case "\$cmd" in
+  psql|pg_dump|pg_restore|pg_isready)
+    final=(); i=0
+    while [ \$i -lt \${#args[@]} ]; do
+      case "\${args[\$i]}" in
+        -h|-p) i=\$((i+2)); continue ;;
+        *) final+=("\${args[\$i]}"); i=\$((i+1)) ;;
+      esac
+    done
+    exec "\$cmd" -h 127.0.0.1 -p $SHAPEDPORT "\${final[@]}" ;;
+  *) exec "\$cmd" \${args[@]+"\${args[@]}"} ;;
+esac
 SHIM
   chmod +x "$WORK/bin/docker"
 
@@ -261,7 +291,8 @@ SHIM
   PATH="$WORK/bin:$PATH" "$ROOT/deploy/backup.sh" --verify >"$WORK/verify.log" 2>&1
   VSTATUS=$?
   [ "$VSTATUS" = "0" ] && ok "deploy/backup.sh --verify completed" \
-                       || bad "deploy/backup.sh --verify failed" "$(grep -iE 'error|refus|FATAL' "$WORK/verify.log" | head -1)"
+                       || { bad "deploy/backup.sh --verify failed" "$(grep -iE 'error|refus|FATAL' "$WORK/verify.log" | head -1)"
+                            [ -n "${DRILL_DEBUG:-}" ] && { echo "--- verify.log tail ---"; tail -20 "$WORK/verify.log"; }; }
   grep -q "preparing .* (platform roles, schemas, extensions)" "$WORK/verify.log" \
     && ok "it used the SHARED preparation, not the old extensions-only copy" \
     || bad "it did not run the shared preparation" "the wrappers have diverged again"
@@ -270,6 +301,9 @@ SHIM
   grep -q "pg_dump (inside the db container, as supabase_admin)" "$WORK/verify.log" \
     && ok "the production backup dumps as the platform superuser" \
     || bad "the production backup did not dump as the admin role" "it would read no RLS-protected table"
+  grep -qE '(pg_dump|pg_restore)[^|]*[<>] *"?\$WORK' "$ROOT/deploy/backup.sh" "$ROOT/deploy/restore.sh" \
+    && bad "a dump still crosses an exec pipe" "that is what truncated the office server's archive" \
+    || ok "no archive crosses an exec stream — both directions copy a file"
   grep -q "pg_restore exit=0, 0 error line(s)" "$WORK/verify.log" \
     && ok "pg_restore: exit 0, zero diagnostics" || bad "pg_restore reported errors" "$(grep 'pg_restore exit' "$WORK/verify.log" | head -1)"
   for n in "all 14 business tables present" "policies restored" "public, auth, storage and extensions all present" "search_crm() executes"; do

@@ -105,11 +105,15 @@ echo "--- pg_restore into ${TARGET}"
 # A properly prepared target produces NO diagnostics, so any are a failure rather
 # than noise to read past. Nothing is suppressed: pg_restore runs with every error
 # reported, and this stops if it reported one.
+# Copied in as a file for the same reason the backup copies out as one: a
+# multiplexed exec stream is not a safe way to move a large binary archive.
+INSIDE="$(file_in "$WORK/restore.dump")"
 set +e
 pg_restore_admin "$TARGET" \
-  --no-owner --no-privileges --clean --if-exists < "$WORK/restore.dump" 2> "$WORK/restore.log"
+  --no-owner --no-privileges --clean --if-exists "$INSIDE" 2> "$WORK/restore.log"
 STATUS=$?
 set -e
+file_in_cleanup
 ERRORS=$(grep -c 'pg_restore: error' "$WORK/restore.log" || true)
 echo "--- pg_restore exit=${STATUS}, ${ERRORS} error line(s)"
 if [ "$ERRORS" -gt 0 ] || [ "$STATUS" -ne 0 ]; then

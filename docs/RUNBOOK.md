@@ -130,6 +130,28 @@ the backup, an administrative operation, uses an administrative role.
 administrative role too. If you do not, the guard refuses the archive rather than
 publishing an empty one.
 
+### The dump is copied out as a file, never piped
+
+`docker compose exec` multiplexes stdout, and a custom-format dump is large and
+binary. Piping one through it truncated a ~220 KB archive to **95,811 bytes** on the
+office server. A custom archive keeps its table of contents at the *end*, so what
+survived could not be read at all — and because the old checker looked for
+per-table entries first, it reported every business table missing and blamed the
+dumping role. The byte count was the tell: a schema-only dump of this database is
+212 KB, so 95 KB was never "schema without data", it was cut off.
+
+Both directions now move a **file** — `pg_dump --file=` inside the container then
+`docker compose cp` out, and `docker compose cp` in before `pg_restore`. There is no
+stream framing to lose bytes to, and pg_dump's own exit status is observed directly.
+
+If a backup ever fails again, the message says which of the three it is:
+
+| Message | Meaning |
+|---|---|
+| `The archive cannot be read — truncated or corrupt` | a **transport** fault; nothing to do with roles |
+| `The archive lists cleanly but does not decode` | data blocks missing |
+| `readable but incomplete — no TABLE DATA for: …` | the **dumping role** could not read those tables |
+
 ### Two wrappers, one preparation
 
 There are two restore entry points, and they do the same job for different callers:

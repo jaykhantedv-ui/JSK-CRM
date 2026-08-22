@@ -54,11 +54,15 @@ echo "--- pg_dump (inside the db container, as $ADMIN_ROLE)"
 # tables, no data, an archive that restores an empty database. No policy is changed
 # and no application role gains anything — see deploy/lib/db-admin.sh.
 #
+# The dump is written to a file inside the container and copied out, never piped
+# through `docker compose exec` — that stream truncated a 220 KB archive to 95 KB
+# on the office server and produced a file pg_restore could not read.
+#
 # A failure here must never reach the encryption step: `set -e` stops the script,
 # and the completeness check below reads the artifact rather than trusting that.
-pg_dump_admin postgres \
+dump_out postgres "$WORK/$NAME.dump" \
   --format=custom --no-owner --no-privileges \
-  --schema=public --schema=auth --schema=storage > "$WORK/$NAME.dump"
+  --schema=public --schema=auth --schema=storage
 
 RAW=$(stat -c %s "$WORK/$NAME.dump")
 echo "--- dumped ${RAW} bytes"

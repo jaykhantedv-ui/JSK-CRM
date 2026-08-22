@@ -71,26 +71,46 @@ pg_restore_admin() { # pg_restore_admin <database> [pg_restore args...]
     ${ADMIN_ARGS[@]+"${ADMIN_ARGS[@]}"} -U "$ADMIN_ROLE" --dbname "$db" "$@"
 }
 
-# pg_dump over the same administrative path.
+# MOVING A DUMP BETWEEN HOST AND CONTAINER — as a file, never as a stream.
 #
-# A DISASTER-RECOVERY BACKUP MUST READ THE WHOLE DATABASE, and `postgres` cannot.
-# pg_dump issues `SET row_security = off`, which makes any read of a table with a
-# policy fail unless the reading role is exempt. A role is exempt two ways: it owns
-# the table (policies do not apply to owners), or it has BYPASSRLS. `postgres` is
-# neither a superuser nor BYPASSRLS in this image, so the moment the CRM tables are
-# owned by anything else it can read none of them — every business table comes back
-# with no data and the archive is worthless. That is not hypothetical: it is what
-# the office server produced, and what the completeness guard caught.
+# `docker compose exec` multiplexes stdout, and a custom-format dump is large and
+# binary. On the office server a ~220 KB dump arrived as 95,811 bytes: a custom
+# archive keeps its table of contents at the END, so what survived could not be
+# read at all — `pg_restore -l` failed and every business table looked absent. The
+# dump itself was fine; the pipe was not.
 #
-# supabase_admin is a superuser, so it reads everything by definition. This changes
-# nothing about RLS: no policy is altered, nothing is disabled, and no application
-# role gains a privilege. The application still connects as authenticator,
-# supabase_auth_admin and supabase_storage_admin exactly as before. Reading the
-# whole database for a backup is precisely what an administrative role is for.
-pg_dump_admin() { # pg_dump_admin <database> [pg_dump args...]
-  local db="$1"; shift
-  "${DC[@]}" exec -T db pg_dump \
-    ${ADMIN_ARGS[@]+"${ADMIN_ARGS[@]}"} -U "$ADMIN_ROLE" -d "$db" "$@"
+# `docker compose cp` copies a file. There is no framing to lose bytes to, and
+# pg_dump's own exit status is observed directly instead of a pipeline's.
+#
+# WHY THE DUMP RUNS AS supabase_admin. pg_dump issues `SET row_security = off`,
+# which fails for any role that neither owns the table nor holds BYPASSRLS.
+# `postgres` is neither a superuser nor BYPASSRLS in this image, and every CRM
+# table has RLS — so once those tables are owned by anything else it can read none
+# of them. A superuser reads the whole database by definition, which is what a
+# disaster-recovery backup is for. No policy is changed, nothing is disabled, and
+# no application role gains a privilege: the services still connect as
+# authenticator, supabase_auth_admin and supabase_storage_admin.
+CONTAINER_TMP="/tmp/jsk-transfer-$$"
+
+# dump_out <database> <host-destination> [pg_dump args...]
+dump_out() {
+  local db="$1" dest="$2"; shift 2
+  local inside="${CONTAINER_TMP}.dump"
+  "${DC[@]}" exec -T db rm -f "$inside" >/dev/null 2>&1 || true
+  "${DC[@]}" exec -T db pg_dump ${ADMIN_ARGS[@]+"${ADMIN_ARGS[@]}"} \
+    -U "$ADMIN_ROLE" -d "$db" --file="$inside" "$@"
+  "${DC[@]}" cp "db:$inside" "$dest"
+  "${DC[@]}" exec -T db rm -f "$inside" >/dev/null 2>&1 || true
+}
+
+# file_in <host-source> — copies a file into the container, echoes its path there.
+file_in() {
+  local src="$1" inside="${CONTAINER_TMP}.restore"
+  "${DC[@]}" cp "$src" "db:$inside" >/dev/null
+  printf '%s' "$inside"
+}
+file_in_cleanup() {
+  "${DC[@]}" exec -T db rm -f "${CONTAINER_TMP}.restore" >/dev/null 2>&1 || true
 }
 
 # A neutral probe for questions asked BEFORE the admin path is known. `pg_roles` is
