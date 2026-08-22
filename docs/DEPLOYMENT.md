@@ -632,11 +632,19 @@ application-facing:
 
 | Operation | Why it needs the platform superuser |
 |---|---|
+| **Applying the migrations** | they create extensions, install functions the API roles execute, and grant across platform schemas |
 | Aligning the service-role passwords | the service roles are reserved; only a superuser may alter them |
 | Preparing a restore target | creating the platform roles the archive's policies name |
 | **Taking the backup** | `pg_dump` sets `row_security = off`, which fails for any role that neither owns the table nor has `BYPASSRLS` — and every CRM table has RLS |
 
-That last one is why the office server's first real backup contained no business
+The first is why the office server came up with a healthy database, healthy Auth
+and Storage, an empty `supabase_migrations` ledger and not one CRM table:
+`deploy/migrate.sh` applied them as `postgres`, which cannot. `deploy/migrate.sh`
+now refuses to start unless the role it resolved is genuinely a superuser, so a
+misconfigured server stops the deployment instead of quietly producing an empty
+database.
+
+The last is why the office server's first real backup contained no business
 data at all. `postgres` is not a superuser in this image, so once the CRM tables are
 owned by anything else it can read none of them. **No RLS policy was changed to fix
 it and no application role gained a privilege**; the backup simply uses the role

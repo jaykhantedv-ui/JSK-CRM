@@ -236,46 +236,9 @@ if [ "$SHAPED_UP" = "1" ]; then
     || ok "and it is refused, so no artifact would be published"
 
   # The transport shim.
-  mkdir -p "$WORK/bin"
-  cat > "$WORK/bin/docker" <<SHIM
-#!/usr/bin/env bash
-# Translates the compose calls the deploy scripts make into local equivalents:
-#   compose exec -T db <cmd> <args>   -> <cmd> against 127.0.0.1:$SHAPEDPORT
-#   compose cp db:<src> <dest>        -> cp <src> <dest>
-#   compose cp <src> db:<dest>        -> cp <src> <dest>
-# Everything else is a no-op success.
-args=(); seen_exec=0; seen_cp=0; cmd=""
-while [ \$# -gt 0 ]; do
-  case "\$1" in
-    compose|-T) shift ;;
-    --env-file) shift 2 ;;
-    exec) seen_exec=1; shift ;;
-    cp) seen_cp=1; shift ;;
-    stop|start|ps) exit 0 ;;
-    db) if [ "\$seen_cp" = 1 ]; then args+=("\$1"); fi; shift ;;
-    *) if [ "\$seen_exec" = 1 ] && [ -z "\$cmd" ]; then cmd="\$1"; else args+=("\$1"); fi; shift ;;
-  esac
-done
-if [ "\$seen_cp" = 1 ]; then
-  # Strip the db: prefix from whichever side carries it; both sides are local here.
-  src="\${args[0]#db:}"; dst="\${args[1]#db:}"
-  exec cp -f "\$src" "\$dst"
-fi
-[ -n "\$cmd" ] || exit 0
-case "\$cmd" in
-  psql|pg_dump|pg_restore|pg_isready)
-    final=(); i=0
-    while [ \$i -lt \${#args[@]} ]; do
-      case "\${args[\$i]}" in
-        -h|-p) i=\$((i+2)); continue ;;
-        *) final+=("\${args[\$i]}"); i=\$((i+1)) ;;
-      esac
-    done
-    exec "\$cmd" -h 127.0.0.1 -p $SHAPEDPORT "\${final[@]}" ;;
-  *) exec "\$cmd" \${args[@]+"\${args[@]}"} ;;
-esac
-SHIM
-  chmod +x "$WORK/bin/docker"
+  # The transport stand-in, shared with scripts/test-migrations.sh.
+  . "$ROOT/scripts/lib/compose-shim.sh"
+  write_compose_shim "$WORK/bin" "$SHAPEDPORT"
 
   # A temporary production.env, removed on exit. There is no real one to disturb.
   [ -f "$PROD_ENV" ] && mv -f "$PROD_ENV" "$PROD_ENV.drillbak"

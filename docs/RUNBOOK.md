@@ -37,6 +37,14 @@ a green deploy with a red smoke test is a bad deploy.
 
 ## Migrate
 
+> **On the office server the migrations run as `supabase_admin`.** They create
+> extensions, install functions the API roles execute and grant across platform
+> schemas — superuser work — and `postgres` is an ordinary role in that image.
+> `deploy/migrate.sh` resolves the same administrative path the restore and the
+> credential alignment use, and refuses to start if that role is not a superuser.
+> Each migration commits with its ledger row or not at all, and the row is read
+> back afterwards as proof that both landed.
+
 Migrations are applied **only** by the deploy pipeline. Not from a laptop, and
 never through the Supabase dashboard SQL editor — a hand-applied change is
 invisible to the migration ledger, and the next deployment will either fail or
