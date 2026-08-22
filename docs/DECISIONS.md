@@ -1806,9 +1806,13 @@ change, which is why it is safe on a database that already holds the business.
 `scripts/test-service-credentials.sh` is the regression test. It recreates the exact
 starting state on a real PostgreSQL server, proves all three roles are refused, runs
 the alignment, and proves they are accepted — so the fix is provable without pulling
-a single container image. It temporarily requires `scram-sha-256` on loopback,
-because the development cluster trusts it and under `trust` a password test proves
-nothing; it refuses to run at all if that switch does not take effect.
+a single container image.
+
+> **Superseded in part by ADR-036.** This decision fixed *which* password the roles
+> carry, and its check was made over loopback. On the office server the database
+> image trusts loopback, so that check could pass while the services still failed:
+> the remaining defect was the *scheme* the verifier was stored in, which only an
+> off-loopback login can detect. ADR-036 records the correction.
 
 **Alternatives considered.**
 - **Mount `roles.sql` as an initdb hook**, as upstream's compose does. Rejected as
@@ -1819,6 +1823,73 @@ nothing; it refuses to run at all if that switch does not take effect.
   as `authenticator` precisely so it can switch to the caller's role — RLS is the
   authorization boundary (§15, CLAUDE.md §6), and a superuser connection would
   bypass every policy in the database.
+
+### ADR-036 — The verifier must be SCRAM, and the credential test must not use loopback
+
+**Status:** Accepted
+**Date:** 2026-08-22   **Decided by:** Engineering
+
+**Context.** After ADR-035 the office server still failed. PostgreSQL was healthy,
+all three roles existed, and `psql` inside the db container authenticated — while
+GoTrue, PostgREST and storage-api restart-looped on `password authentication failed`.
+Two separate faults were hiding behind one another.
+
+The **defect**: `alter role ... password '<literal>'` stores a verifier in whatever
+scheme `password_encryption` names at that moment. Nothing in the deployment set it,
+so the image's `postgresql.conf` decided — and an md5 verifier cannot satisfy the
+`scram-sha-256` rule the image's `pg_hba.conf` applies to the Docker subnet. The role
+had a password that worked from one address and failed from every other.
+
+The **reason it was not caught**: that image also carries
+`host all all 127.0.0.1/32 trust`. ADR-035's check logged in over loopback, where the
+password is never verified at all. It reported success for roles whose verifier could
+not satisfy SCRAM under any circumstances — a test that could only ever pass.
+
+**Decision.** Fix both, and make the second impossible to reintroduce.
+
+- `deploy/db/service-roles.sql` sets `password_encryption = 'scram-sha-256'` for its
+  own session before assigning anything, so the stored verifier does not depend on
+  the image's configuration. Nothing global is changed.
+- The same script then **asserts** that every aligned role carries a
+  `SCRAM-SHA-256` verifier and raises if not, so a wrong scheme fails the deployment
+  at the point it is created rather than at the point a service tries to log in.
+  Only the scheme's NAME is read; the verifier is never selected, printed or logged.
+- `deploy/db-credentials.sh --test` authenticates **from a separate container** on
+  the compose network, reaching the database by service name — the same pg_hba rule
+  the three services match. It then asks the server which client address it saw and
+  fails on loopback, empty or unreadable. The check has no passing path that avoids
+  SCRAM.
+- `deploy/db-credentials.sh` no longer pipes the alignment through `sed`: a pipeline
+  reports the last command's status, so a failed alignment — including that new
+  assertion — was being discarded, and startup continued regardless.
+
+**Consequences.** A deployment can no longer report healthy credentials while the
+services cannot connect. The two failure modes are now distinguishable by name in the
+output: a role without a SCRAM verifier is a scheme problem; a role with one that
+still cannot log in from another container is a pg_hba or network problem.
+
+`password_encryption` is set per session, never globally, so no other client's
+behaviour changes and the image's own configuration is left alone. Nothing about
+authentication *semantics* moved: same roles, same GoTrue, same JWTs, same RLS —
+PostgREST still connects as `authenticator` precisely so it can switch to the
+caller's role, and no service was given a superuser connection.
+
+`scripts/test-service-credentials.sh` now reproduces the whole shape on a real
+PostgreSQL server, with a `trust` loopback rule and a `scram-sha-256` rule on a
+non-loopback address: it shows the md5 verifier passing over loopback and being
+refused over the network — the exact false positive — then shows the alignment fixing
+it. It also proves the alignment still produces SCRAM verifiers on a server whose own
+`password_encryption` is md5, which is the case that caused this.
+
+**Alternatives considered.**
+- **Add a `trust` or `md5` rule for the Docker subnet.** Rejected outright: it
+  removes authentication between containers to make a test pass.
+- **Set `password_encryption` globally in the db service command.** Rejected as the
+  primary mechanism — it fixes new passwords on one deployment's configuration and
+  still says nothing about what is actually stored. The session setting plus the
+  assertion is both narrower and self-proving.
+- **Keep the loopback check as a fast pre-flight.** Rejected: a check that cannot
+  fail is worse than no check, because it is read as evidence.
 
 ---
 

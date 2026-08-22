@@ -70,24 +70,77 @@ echo "--- service-role credentials: ${STATE}"
 if [ "$MODE" = "align" ]; then
   # The SQL is mounted read-only into the container by docker-compose.yml so that
   # the password is read from the container's environment and never travels.
-  psql_admin -q -f /etc/jsk/service-roles.sql 2>&1 \
-    | sed -n 's/^NOTICE:  /    /p'
+  #
+  # Captured rather than piped: `psql ... | sed` reports SED's exit status, so a
+  # failed alignment — including the verifier assertion inside the script — would
+  # have been swallowed and the deployment would have carried on to start services
+  # that cannot authenticate.
+  if ALIGN_OUT="$(psql_admin -q -f /etc/jsk/service-roles.sql 2>&1)"; then
+    printf '%s\n' "$ALIGN_OUT" | sed -n 's/^NOTICE:  /    /p'
+  else
+    printf '%s\n' "$ALIGN_OUT" | sed -n 's/^\(ERROR\|FATAL\|NOTICE\):  /    /p' >&2
+    echo "the service-role alignment FAILED — not starting anything that depends on it" >&2
+    exit 1
+  fi
 fi
 
-# --- 1-3. each service role can actually authenticate ------------------------
-# Not "the role exists" — an actual password login over TCP, which is exactly what
-# GoTrue, PostgREST and storage-api do. PGPASSWORD is set from the container's own
-# environment inside the container, so the value never reaches this shell.
-echo "--- can each service role authenticate?"
+# --- the stored verifier scheme ----------------------------------------------
+# Metadata only: the scheme's NAME, never the verifier. An md5 verifier is the
+# failure that a loopback `trust` rule hides — the password "works" there and is
+# refused by every scram-sha-256 rule, which is every other address.
+echo "--- password verifier scheme"
+printf '    server password_encryption: %s\n' \
+  "$(psql_admin -tAc 'show password_encryption;' 2>/dev/null | tr -d '[:space:]')"
+psql_admin -tAc "
+  select rolname || ' -> ' ||
+         case
+           when rolpassword is null then 'NO PASSWORD'
+           when rolpassword like 'SCRAM-SHA-256\$%' then 'SCRAM-SHA-256'
+           when rolpassword like 'md5%' then 'md5 (cannot satisfy a scram-sha-256 rule)'
+           else 'unrecognised'
+         end
+  from pg_authid
+  where rolname in ('authenticator','supabase_auth_admin','supabase_storage_admin')
+  order by rolname;" 2>/dev/null | sed 's/^/    /'
 for role in "${SERVICE_ROLES[@]}"; do
-  if "${DC[@]}" exec -T db sh -c \
-       'PGPASSWORD="$POSTGRES_PASSWORD" psql -q -tAc "select 1" \
-          -h 127.0.0.1 -p 5432 -U "$1" -d postgres' _ "$role" 2>/dev/null \
-       | grep -qx 1; then
-    ok "$role can authenticate"
-  else
-    bad "$role CANNOT authenticate"
-  fi
+  scheme="$(psql_admin -tAc "select case when rolpassword like 'SCRAM-SHA-256\$%' then 'scram' else 'other' end from pg_authid where rolname = '$role';" 2>/dev/null | tr -d '[:space:]')"
+  [ "$scheme" = "scram" ] && ok "$role has a SCRAM-SHA-256 verifier" \
+                          || bad "$role has NO SCRAM-SHA-256 verifier"
+done
+
+# --- 1-3. each service role authenticates OVER THE CONTAINER NETWORK ---------
+#
+# THIS MUST NOT USE 127.0.0.1. The database image's pg_hba.conf trusts loopback:
+#
+#     host all all 127.0.0.1/32   trust
+#     host all all 172.16.0.0/12  scram-sha-256
+#
+# so a login from inside the db container succeeds without ever checking the
+# password, and reports success for a role whose verifier cannot satisfy SCRAM at
+# all. That false positive is precisely what let a broken deployment look fixed.
+#
+# The login below is made from a SEPARATE container on the compose network,
+# reaching the database by its service name — the same address family, and the
+# same pg_hba rule, as GoTrue, PostgREST and storage-api. The server is asked
+# which address it saw, and anything loopback, empty or unreadable is a FAILURE:
+# this check has no passing path that avoids SCRAM.
+#
+# `compose run` is used so POSTGRES_PASSWORD comes from the db service's own
+# environment — the value never appears in a command line or in this shell.
+echo "--- can each service role authenticate over the container network?"
+net_login() {
+  "${DC[@]}" run --rm -T --no-deps --entrypoint sh db -c \
+    'PGPASSWORD="$POSTGRES_PASSWORD" psql -q -tAc "select host(inet_client_addr())" \
+       -h db -p 5432 -U "$1" -d postgres' _ "$1" 2>/dev/null | tr -d '[:space:]'
+}
+for role in "${SERVICE_ROLES[@]}"; do
+  addr="$(net_login "$role" || true)"
+  case "$addr" in
+    ''|127.*|::1|localhost)
+      bad "$role did NOT authenticate over the network (saw: ${addr:-no connection})" ;;
+    *)
+      ok "$role authenticated from $addr — off-loopback, so scram-sha-256 applied" ;;
+  esac
 done
 
 # --- 4-6. each service is actually connected to the database -----------------
@@ -97,21 +150,24 @@ if [ "$MODE" = "--test" ]; then
   echo "--- is each service connected to the database?"
 
   # pg_stat_activity is the proof that matters: a row for a role means a process
-  # authenticated as it and is holding a session. An HTTP 200 could be served by a
-  # container that has not reached PostgreSQL at all.
-  CONNECTED="$(psql_admin -tAc \
-    "select string_agg(distinct usename, ' ') from pg_stat_activity
-      where usename in ('authenticator','supabase_auth_admin','supabase_storage_admin');" \
-    2>/dev/null || true)"
-
+  # authenticated as that role and is holding a session. An HTTP 200 could be
+  # served by a container that never reached PostgreSQL at all.
+  #
+  # client_addr is recorded too. It is null for a unix-socket connection, so a
+  # non-null address is independent confirmation that the session arrived over the
+  # container network and therefore through the scram-sha-256 rule.
   check_service() {  # check_service <label> <role> <url>
-    local label="$1" role="$2" url="$3" seen=0
-    case " $CONNECTED " in *" $role "*) seen=1 ;; esac
-    if [ "$seen" = 1 ]; then
-      ok "$label is connected to the database as $role"
+    local label="$1" role="$2" url="$3" addr
+    addr="$(psql_admin -tAc \
+      "select coalesce(host(client_addr), 'socket') from pg_stat_activity
+        where usename = '$role' and client_addr is not null limit 1;" \
+      2>/dev/null | tr -d '[:space:]')"
+
+    if [ -n "$addr" ] && [ "$addr" != "socket" ]; then
+      ok "$label is connected as $role from $addr (scram over the network)"
     elif "${DC[@]}" exec -T gateway wget -qO- --timeout=10 "$url" >/dev/null 2>&1; then
-      # Answering but holding no pooled session — true for a service that opens a
-      # connection per request. Still proves it authenticated.
+      # Answering but holding no pooled session — true of a service that opens a
+      # connection per request. It still had to authenticate to answer at all.
       ok "$label answers through the database ($url)"
     else
       bad "$label did NOT reach the database"

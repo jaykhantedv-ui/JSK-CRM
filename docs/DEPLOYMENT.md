@@ -611,6 +611,8 @@ three services restart-looping.
 `POSTGRES_PASSWORD`, and `deploy/db-credentials.sh` applies it and proves it worked.
 Upstream Supabase's own self-hosting compose solves it the same way.
 
+- It stores a **SCRAM-SHA-256 verifier**, and proves it did. This is the half that a
+  loopback test cannot see — see below.
 - It runs **before** auth, rest and storage start, so they never see a wrong password.
 - It is **idempotent and data-safe**: re-assigning a role password touches no table,
   no schema and no policy, so it runs on every start.
@@ -622,6 +624,49 @@ Upstream Supabase's own self-hosting compose solves it the same way.
 To change `POSTGRES_PASSWORD` on a running deployment: edit
 `deploy/env/production.env`, then `deploy/start.sh`. The alignment step re-assigns
 the roles to the new value before the services restart.
+
+### The password must be stored as a SCRAM verifier, and tested off-loopback
+
+Setting the right password is not sufficient. `alter role ... password '<literal>'`
+stores a verifier in whatever scheme `password_encryption` names **at that moment**,
+and a database image configured for `md5` produces an md5 verifier. The image's
+`pg_hba.conf` looks like this:
+
+```
+host all all 127.0.0.1/32   trust
+host all all 172.16.0.0/12  scram-sha-256
+```
+
+An md5 verifier cannot satisfy a `scram-sha-256` rule. So the role ends up with a
+password that **works from inside the db container and fails from every other
+address** — which is exactly what the office server showed: PostgreSQL healthy, all
+three roles present, `psql` inside the container succeeding, and GoTrue, PostgREST
+and storage-api restart-looping on `password authentication failed`.
+
+Two things follow, and the deployment now does both:
+
+1. **`deploy/db/service-roles.sql` pins `password_encryption = 'scram-sha-256'` for
+   its own session** — so the verifier is correct regardless of the image's
+   `postgresql.conf` — and then **asserts** every aligned role carries a
+   `SCRAM-SHA-256` verifier, failing the deployment if not. Only the scheme's name
+   is ever read or reported; the verifier itself is never selected or printed.
+
+2. **The credential test never uses loopback.** `deploy/db-credentials.sh --test`
+   logs in from a *separate container* on the compose network, reaching the database
+   by its service name — the same address range, and the same pg_hba rule, as the
+   three services. It then asks the server which address it saw, and treats
+   loopback, empty or unreadable as a **failure**. There is no passing path through
+   the `trust` rule.
+
+   It also reports each role's verifier scheme and the server's `password_encryption`,
+   and confirms each service's own session in `pg_stat_activity` including the
+   address it connected from — a non-null `client_addr` being independent proof the
+   session arrived over the network rather than a local socket.
+
+`scripts/test-service-credentials.sh` proves all of this against a real PostgreSQL
+server without needing any container image: it reproduces the md5-verifier state,
+shows it passing over a `trust` loopback rule and being refused off-loopback, then
+applies the alignment and shows the network login succeed.
 
 ## 10.5 Start automatically on boot
 

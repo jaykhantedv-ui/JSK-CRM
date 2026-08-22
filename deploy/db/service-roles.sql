@@ -36,6 +36,21 @@
 \set ON_ERROR_STOP on
 \set pgpass `echo "$POSTGRES_PASSWORD"`
 
+-- THE VERIFIER MUST BE SCRAM. This is the half that a loopback test cannot see.
+--
+-- `alter role ... password '<literal>'` stores a verifier in whatever scheme
+-- `password_encryption` names AT THAT MOMENT. If the server is configured for
+-- `md5` — which a database image may still do for backwards compatibility — the
+-- role ends up with an md5 verifier, and a `scram-sha-256` line in pg_hba.conf
+-- cannot authenticate against it. The role then has a password that works over a
+-- `trust` loopback rule and fails from every other address with exactly
+-- `password authentication failed`, which is what the office server saw.
+--
+-- Setting it here, for this session only, makes the stored verifier independent
+-- of the image's postgresql.conf. Nothing global is changed: the server's own
+-- setting is untouched for every other connection.
+set password_encryption = 'scram-sha-256';
+
 -- `select set_config(...)` returns the value it set, so its output is discarded.
 \o /dev/null
 select set_config('jsk.bootstrap_password', :'pgpass', false);
@@ -72,6 +87,29 @@ begin
     raise notice 'service roles absent from this image (not created here): %',
       array_to_string(missing, ', ');
   end if;
+end $$;
+
+-- Prove the verifier, not just that the statement ran.
+--
+-- A successful `alter role` says nothing about the scheme it stored, and the
+-- scheme is the whole failure. Only the NAME of the scheme is examined; the
+-- verifier itself is never selected, printed or logged.
+do $$
+declare
+  wrong text[];
+begin
+  select array_agg(rolname order by rolname) into wrong
+  from pg_authid
+  where rolname in ('authenticator', 'supabase_auth_admin', 'supabase_storage_admin')
+    and (rolpassword is null or rolpassword not like 'SCRAM-SHA-256$%');
+
+  if wrong is not null then
+    raise exception
+      'no SCRAM-SHA-256 verifier after alignment for: % — password_encryption was "%"',
+      array_to_string(wrong, ', '), current_setting('password_encryption');
+  end if;
+
+  raise notice 'verifier scheme confirmed: SCRAM-SHA-256 on every aligned role';
 end $$;
 
 -- Do not leave it readable for the rest of the session.
