@@ -5,7 +5,7 @@ import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { PersonForm, type ManagerOption } from '@/features/organization/person-form'
 import { ROLE_LABELS } from '@/lib/permissions'
 import { listOutlets } from '@/services/outlet.service'
-import { listPeople } from '@/services/user.service'
+import { loadOrganization } from '@/services/user.service'
 
 export const metadata: Metadata = { title: 'People · JSK CRM' }
 
@@ -23,10 +23,15 @@ export const metadata: Metadata = { title: 'People · JSK CRM' }
  * The list is whatever `users_select` returns, which for an owner or
  * administrator is the whole organisation. Nothing here filters, so nothing here
  * can leak by forgetting to.
+ *
+ * `loadOrganization()` is the one helper both organisation screens read from
+ * (ADR-041). It resolves each person's manager from the set already fetched —
+ * never with a second query — so a `manager_id` pointing outside what the caller
+ * may read shows as no manager rather than fetching the row.
  */
 export default async function PeoplePage() {
   const [people, branches] = await Promise.all([
-    listPeople(),
+    loadOrganization(),
     listOutlets({ includeInactive: true }),
   ])
 

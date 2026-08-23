@@ -2229,6 +2229,95 @@ changes.
   that is a fifth role for one capability, and the capability is exactly "read
   everything", which OWNER already models.
 
+### ADR-041 — The organisation is assembled in the application, not embedded by PostgREST
+
+**Status:** Accepted
+**Date:** 2026-08-23   **Decided by:** Engineering
+
+**Context.** Both organisation screens were dead on the office server:
+
+```
+GET /rest/v1/users?select=*,manager:users!users_manager_id_fkey(id,full_name,role),…
+400  PGRST200
+"Searched for a foreign key relationship between 'users' and 'users' using the
+ hint 'users_manager_id_fkey' in the schema 'public', but no matches were found."
+```
+
+The foreign key is genuinely there —
+`users_manager_id_fkey FOREIGN KEY (manager_id) REFERENCES users(id) ON DELETE
+RESTRICT` — and PostgREST was restarted with its schema cache reloaded. The
+server's PostgREST 12.2.12 does not expose that **self-referencing** relationship
+as embeddable, and no amount of reloading changes that.
+
+It is specifically the self-reference. `services/auth.service.ts` embeds
+`user_outlets!user_outlets_user_id_fkey` on **every authenticated request** and
+has worked in production throughout — so hinted embeds between two different
+tables are fine, and the same PostgREST that serves every sign-in is the one
+refusing `users` → `users`.
+
+**Decision.** Remove the dependency rather than nurse it.
+
+- `lib/organization.ts` holds two **pure** functions: `assembleOrganization()`
+  joins users, outlet links and branch names in memory, and
+  `buildReportingTree()` shapes the result. No database, no session, no I/O — so
+  the resolution rules are exhaustively testable without standing up PostgREST,
+  which is exactly what could not be done before.
+- `loadOrganization()` in `services/user.service.ts` is **the one loader** both
+  screens read from. Three plain queries, no embedding:
+
+  | Query | Bounded by |
+  |---|---|
+  | `users` — `select *` | `users_select` |
+  | `user_outlets` — three columns, `in` the visible ids | `user_outlets_select` |
+  | `outlets` — `id, name` | `outlets_select` |
+
+  Every one of those three shapes is already issued by code that has been running
+  in production since the first deployment (`listUsers`, `listUserOutlets`,
+  `listOutlets`), which is why this is a safe change to make without a PostgREST
+  to test against.
+
+- **A manager is resolved ONLY from the set the caller was already authorised to
+  read.** A `manager_id` pointing outside that set resolves to `null`; it is
+  never a reason to fetch the row. No service-role client, no `SECURITY DEFINER`
+  helper, no second query. That is what stops `manager_id` becoming a side
+  channel — a salesperson sees their own sales head because `users_select` grants
+  them that row, and nobody else because it does not.
+
+- A person whose manager is not in the visible set becomes a **root** of the
+  tree, so the structure is well-formed for whoever is looking at it rather than
+  dangling off a node they cannot see.
+
+**Consequences.** Three round trips instead of one, on two administrative screens
+that are opened rarely and list twenty people. Nothing else changes: no migration,
+no policy, no grant, no helper, no change to `manager_id` or to
+`guard_user_hierarchy()`. The security model is untouched — the set of rows is
+exactly what `select * from public.users` returns for that caller, which is what
+the embedded version was filtered down to anyway.
+
+`tests/integration/pilot-organization.test.ts` now feeds the **real row-level
+security output** for each role through the **real assembly function**, so the
+manager names resolved in the tests are the ones the screens render. If the RLS
+scope ever widened, those names would widen with it and the tests would fail; a
+test over hand-written rows could not notice.
+
+**Alternatives considered.**
+- **Wait for a PostgREST that exposes it, or upgrade the image.** Rejected: the
+  deployment is pinned deliberately (ADR-033), an upgrade to fix one screen is a
+  large change to the whole data path, and the feature is not needed at all.
+- **A database VIEW joining `users` to itself.** Rejected: a view is a second
+  place the authorization rule would have to be got right, and a view without
+  `security_invoker` silently bypasses RLS (§25) — the exact failure CLAUDE.md §6
+  singles out.
+- **A `SECURITY DEFINER` function returning the org chart.** Rejected outright:
+  it reads rows the caller cannot, so every caller's scope would have to be
+  re-implemented inside it. That is the rule in two places, and the second one
+  bypasses RLS.
+- **Fetch missing managers with a second, unfiltered query.** Rejected: it
+  answers "who is this person's manager" for a manager the caller may not read,
+  which is precisely the leak the row-level policy exists to prevent.
+- **Fix it on the People page only.** Rejected: the Reporting Structure screen
+  and every future organisation query would each grow their own copy. One loader.
+
 ---
 
 ## How to record a decision

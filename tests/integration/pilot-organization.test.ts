@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { assembleOrganization, buildReportingTree } from '@/lib/organization'
+import type { UserRow } from '@/types/domain'
+
 import { canSee, connect, expectRejected, updateRowCount, visibleIds, type Db } from './harness'
 
 /**
@@ -610,5 +613,215 @@ describe('the administrator sees the pilot and changes none of it', () => {
       expect(await canSee(tx, 'opportunities', ORG.thamaraiOpportunity)).toBe(true)
       expect(await canSee(tx, 'opportunities', ORG.anandhOpportunity)).toBe(true)
     })
+  })
+})
+
+// ====================================== the organisation screens ==========
+
+/**
+ * The People and Reporting Structure screens, end to end minus the transport
+ * (ADR-041).
+ *
+ * **The rows come from real row-level security; the assembly is the real
+ * function the pages call.** `loadOrganization()` is three plain queries and a
+ * call to `assembleOrganization` — no PostgREST embedding, after the office
+ * server's PostgREST 12.2.12 refused to expose `users` → `users` and answered
+ * PGRST200 on both screens. The queries below are exactly what that helper
+ * issues, run as the role under test, so what these assert is what those screens
+ * render.
+ *
+ * The point of doing it this way: if the RLS scope ever widened, the manager
+ * names resolved here would widen with it and these tests would fail. A test
+ * that assembled hand-written rows could not notice.
+ */
+async function organizationAs(userId: string) {
+  return withPilot(userId, async (tx) => {
+    const users = await tx.query('select * from public.users order by full_name')
+    const links = await tx.query(
+      'select user_id, outlet_id, revoked_at from public.user_outlets where revoked_at is null',
+    )
+    const branches = await tx.query('select id, name from public.outlets')
+
+    const people = assembleOrganization(users.rows as UserRow[], links.rows, branches.rows)
+    return { people, tree: buildReportingTree(people) }
+  })
+}
+
+const lineOf = (people: { full_name: string; managerName: string | null }[]) =>
+  Object.fromEntries(people.map((p) => [p.full_name, p.managerName]))
+
+describe('the People screen, from real row-level security', () => {
+  it('loads for the OWNER, with every reporting pair resolved', async () => {
+    const { people } = await organizationAs(ORG.jay)
+    const line = lineOf(people)
+
+    expect(line['Vinay Kumar Jain']).toBe('Jay Khanted')
+    expect(line.Pankaj).toBe('Vinay Kumar Jain')
+    expect(line.Jainendra).toBe('Vinay Kumar Jain')
+    expect(line.Dhanendran).toBe('Vinay Kumar Jain')
+    expect(line.Revathi).toBe('Pankaj')
+    for (const name of ['Thamarai', 'Ashokji', 'Deivanai', 'Kathirvel']) {
+      expect(line[name]).toBe('Jainendra')
+    }
+    for (const name of ['Anandh', 'Ankur Tiwari', 'Sathya', 'Selvi']) {
+      expect(line[name]).toBe('Dhanendran')
+    }
+    expect(line['Jay Khanted']).toBeNull()
+  })
+
+  it('loads for the ADMINISTRATOR, who administers the organisation', async () => {
+    const { people } = await organizationAs(ORG.vinay)
+    const names = people.map((p) => p.full_name)
+    for (const name of ['Pankaj', 'Jainendra', 'Dhanendran', 'Revathi', 'Selvi']) {
+      expect(names).toContain(name)
+    }
+    expect(lineOf(people).Revathi).toBe('Pankaj')
+  })
+
+  it('shows a sales head their own team, and resolves nobody else’s manager', async () => {
+    const { people } = await organizationAs(ORG.jainendra)
+    const names = people.map((p) => p.full_name)
+
+    expect(names).toContain('Jainendra')
+    for (const name of ['Thamarai', 'Ashokji', 'Deivanai', 'Kathirvel']) {
+      expect(names).toContain(name)
+    }
+    // The other two teams are not in the set, so nothing about them can be
+    // assembled — not a name, not a manager, not an id.
+    for (const name of ['Revathi', 'Anandh', 'Selvi', 'Pankaj', 'Dhanendran']) {
+      expect(names).not.toContain(name)
+    }
+
+    const line = lineOf(people)
+    expect(line.Thamarai).toBe('Jainendra')
+  })
+
+  it('resolves a sales head’s OWN manager, because they may read that row', async () => {
+    // `users_select` grants `id = my_manager_id()`. So the administrator is in
+    // the set and resolves — from the set, never by a second query.
+    const { people } = await organizationAs(ORG.pankaj)
+    expect(lineOf(people).Pankaj).toBe('Vinay Kumar Jain')
+  })
+
+  it('gives a salesperson themselves and their sales head, and nothing more', async () => {
+    const { people } = await organizationAs(ORG.revathi)
+    const names = people.map((p) => p.full_name).sort()
+
+    expect(names).toEqual(['Pankaj', 'Revathi'])
+    expect(lineOf(people).Revathi).toBe('Pankaj')
+  })
+
+  it('does not let manager_id leak a person the caller cannot read', async () => {
+    // Pankaj's row IS readable to Revathi; Vinay's is not. The column still
+    // points at him, and the assembly must say nothing about him.
+    const { people } = await organizationAs(ORG.revathi)
+    const pankaj = people.find((p) => p.full_name === 'Pankaj')!
+
+    expect(pankaj.manager_id).toBe(ORG.vinay)
+    expect(pankaj.managerName).toBeNull()
+    expect(pankaj.managerRole).toBeNull()
+    expect(people.map((p) => p.id)).not.toContain(ORG.vinay)
+  })
+
+  it('resolves each person’s branch by name', async () => {
+    const { people } = await organizationAs(ORG.jay)
+    const revathi = people.find((p) => p.full_name === 'Revathi')!
+    expect(revathi.outletNames).toEqual(['Moolakarai Branch'])
+    expect(revathi.outletNames).not.toContain('Chithode Branch')
+  })
+})
+
+describe('the Reporting Structure screen, from real row-level security', () => {
+  it('draws the pilot organisation for the OWNER', async () => {
+    const { tree } = await organizationAs(ORG.jay)
+
+    const jay = tree.find((node) => node.person.full_name === 'Jay Khanted')!
+    expect(jay).toBeDefined()
+
+    const vinay = jay.reports.find((node) => node.person.full_name === 'Vinay Kumar Jain')!
+    expect(vinay).toBeDefined()
+
+    const heads = vinay.reports.map((node) => node.person.full_name).sort()
+    expect(heads).toEqual(['Dhanendran', 'Jainendra', 'Pankaj'])
+
+    const teamOf = (name: string) =>
+      vinay.reports
+        .find((node) => node.person.full_name === name)!
+        .reports.map((node) => node.person.full_name)
+        .sort()
+
+    expect(teamOf('Pankaj')).toEqual(['Revathi'])
+    expect(teamOf('Jainendra')).toEqual(['Ashokji', 'Deivanai', 'Kathirvel', 'Thamarai'])
+    expect(teamOf('Dhanendran')).toEqual(['Anandh', 'Ankur Tiwari', 'Sathya', 'Selvi'])
+  })
+
+  it('roots a sales head’s tree at their administrator, and shows one team', async () => {
+    const { tree } = await organizationAs(ORG.jainendra)
+    const roots = tree.map((node) => node.person.full_name)
+
+    // Vinay is readable (their own manager), so the tree hangs from him — and
+    // carries exactly one sales head, this one.
+    expect(roots).toEqual(['Vinay Kumar Jain'])
+    const heads = tree[0].reports.map((node) => node.person.full_name)
+    expect(heads).toEqual(['Jainendra'])
+    expect(tree[0].reports[0].reports.map((node) => node.person.full_name).sort()).toEqual([
+      'Ashokji',
+      'Deivanai',
+      'Kathirvel',
+      'Thamarai',
+    ])
+  })
+
+  it('draws two nodes for a salesperson, and no other team', async () => {
+    const { tree } = await organizationAs(ORG.revathi)
+    expect(tree.map((node) => node.person.full_name)).toEqual(['Pankaj'])
+    expect(tree[0].reports.map((node) => node.person.full_name)).toEqual(['Revathi'])
+  })
+})
+
+describe('a deployment with only the bootstrapped owner', () => {
+  /** The state the office server is in right now: one OWNER, no branches, nobody else. */
+  async function bareOwner<T>(act: (tx: Db) => Promise<T>): Promise<T> {
+    await db.query('begin')
+    try {
+      await db.query(
+        `insert into auth.users (id, email, aud, role, encrypted_password, email_confirmed_at, raw_user_meta_data)
+         values ($1, 'solo@pilot.test', 'authenticated', 'authenticated', 'x', now(),
+                 jsonb_build_object('full_name', 'Solo Owner'::text))`,
+        [ORG.jay],
+      )
+      await db.query(`update public.users set role = 'OWNER' where id = $1`, [ORG.jay])
+      await db.query('select set_config($1, $2, true)', [
+        'request.jwt.claims',
+        JSON.stringify({ sub: ORG.jay, role: 'authenticated' }),
+      ])
+      await db.query('set local role authenticated')
+      return await act(db)
+    } finally {
+      await db.query('rollback')
+    }
+  }
+
+  it('loads both screens before anybody else exists', async () => {
+    const { people, tree } = await bareOwner(async (tx) => {
+      const users = await tx.query('select * from public.users order by full_name')
+      const links = await tx.query(
+        'select user_id, outlet_id, revoked_at from public.user_outlets where revoked_at is null',
+      )
+      const branches = await tx.query('select id, name from public.outlets')
+      const assembled = assembleOrganization(users.rows as UserRow[], links.rows, branches.rows)
+      return { people: assembled, tree: buildReportingTree(assembled) }
+    })
+
+    // The owner sees themselves. The ADR-003 system actor is an INACTIVE ADMIN
+    // and is deliberately visible to an owner administering the organisation.
+    const solo = people.find((p) => p.id === ORG.jay)!
+    expect(solo.full_name).toBe('Solo Owner')
+    expect(solo.managerName).toBeNull()
+    expect(solo.outletNames).toEqual([])
+
+    // A tree, not an exception — which is all the page needs to render.
+    expect(tree.length).toBeGreaterThan(0)
+    expect(tree.some((node) => node.person.id === ORG.jay)).toBe(true)
   })
 })

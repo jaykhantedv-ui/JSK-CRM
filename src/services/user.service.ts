@@ -1,6 +1,12 @@
 import { z } from 'zod'
 
 import { AppError, forbidden, fromPostgrestError } from '@/lib/errors'
+import {
+  assembleOrganization,
+  buildReportingTree,
+  type PersonRow,
+  type ReportingNode,
+} from '@/lib/organization'
 import { MANAGER_ROLE_FOR, canReportTo, roleLabel, type Role } from '@/lib/permissions'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
@@ -50,16 +56,10 @@ export const updateUserSchema = z.object({
 export type CreateUserInput = z.input<typeof createUserSchema>
 export type UpdateUserInput = z.input<typeof updateUserSchema>
 
-/**
- * A person as the organisation screens list them: their line, their branches and
- * whether they are still with the business.
- */
-export type PersonRow = UserRow & {
-  managerName: string | null
-  managerRole: Role | null
-  outletIds: string[]
-  outletNames: string[]
-}
+// The shapes the organisation screens render. The assembly itself is pure and
+// lives in `lib/organization.ts`; this service is the part that talks to the
+// database (CLAUDE.md §8).
+export type { PersonRow, ReportingNode }
 
 /**
  * Is this a reporting line the business allows (ADR-040)?
@@ -270,45 +270,63 @@ export async function listUsers(): Promise<UserRow[]> {
 }
 
 /**
- * Everyone the caller may see, with their line and branches resolved (ADR-040).
+ * THE organisation loader (ADR-040, ADR-041). One helper, every screen that
+ * needs the reporting line.
  *
- * The set is decided by `users_select`, not here: an OWNER or ADMIN gets the
- * whole organisation, a sales head gets their own team, and a salesperson gets
- * themselves and the sales head whose name appears on their records.
+ * **Three plain queries, no PostgREST embedding.** The previous version asked
+ * PostgREST to embed `users` into itself —
+ * `manager:users!users_manager_id_fkey(...)` — and on the office server's
+ * PostgREST 12.2.12 that relationship is not exposed, so both organisation
+ * screens answered:
+ *
+ *     PGRST200 — Could not find a relationship between 'users' and 'users'
+ *
+ * The foreign key genuinely exists and reloading the schema cache did not help.
+ * Rather than depend on a resource-embedding feature that a supported PostgREST
+ * declines to offer, the join is done here, in memory, over three sets that
+ * are each bounded by row-level security:
+ *
+ *   users         `users_select`        — everyone the caller may read
+ *   user_outlets  `user_outlets_select` — their branch assignments
+ *   outlets       `outlets_select`      — branch names, readable by all
+ *
+ * **Nothing is widened.** No service-role client, no `SECURITY DEFINER` helper,
+ * no second query for a manager the caller cannot see. The set is exactly what
+ * one `select * from public.users` returns for that caller and no more, which is
+ * the same set the embedded version was filtered down to.
  */
-export async function listPeople(): Promise<PersonRow[]> {
+export async function loadOrganization(): Promise<PersonRow[]> {
   await requireUser()
-
   const supabase = await createSupabaseServerClient()
-  const { data, error } = await supabase
+
+  const { data: users, error: usersError } = await supabase
     .from('users')
-    // Two FK hints, both required rather than cosmetic: `users` references itself
-    // through `manager_id`, and `user_outlets` references `users` twice — once as
-    // the member and once as `created_by` — so an unhinted embed is ambiguous and
-    // PostgREST refuses it. Written as ONE string literal because the generated
-    // types resolve the shape from it at compile time.
-    .select(
-      '*, manager:users!users_manager_id_fkey(id, full_name, role), user_outlets!user_outlets_user_id_fkey(outlet_id, revoked_at, outlets(id, name))',
-    )
+    .select('*')
     .order('full_name')
 
-  if (error) throw fromPostgrestError(error)
+  if (usersError) throw fromPostgrestError(usersError)
+  if (users.length === 0) return []
 
-  return data.map((row) => {
-    const held = (row.user_outlets ?? []).filter((link) => link.revoked_at === null)
-    const { manager, user_outlets: _links, ...user } = row
-    // A self-referencing embed comes back as an array from the generated types —
-    // PostgREST cannot tell a to-one from a to-many on the same table — and there
-    // is at most one manager.
-    const boss = Array.isArray(manager) ? manager[0] : manager
-    return {
-      ...(user as UserRow),
-      managerName: boss?.full_name ?? null,
-      managerRole: (boss?.role as Role | undefined) ?? null,
-      outletIds: held.map((link) => link.outlet_id),
-      outletNames: held.map((link) => link.outlets?.name).filter((name): name is string => !!name),
-    }
-  })
+  const ids = users.map((user) => user.id)
+
+  // Scoped twice over, and deliberately: `user_outlets_select` bounds it, and
+  // the `in` narrows it to the people already on screen so the two sets cannot
+  // disagree about who exists.
+  const { data: links, error: linksError } = await supabase
+    .from('user_outlets')
+    .select('user_id, outlet_id, revoked_at')
+    .in('user_id', ids)
+    .is('revoked_at', null)
+
+  if (linksError) throw fromPostgrestError(linksError)
+
+  const { data: branches, error: branchesError } = await supabase
+    .from('outlets')
+    .select('id, name')
+
+  if (branchesError) throw fromPostgrestError(branchesError)
+
+  return assembleOrganization(users, links ?? [], branches ?? [])
 }
 
 /**
@@ -336,44 +354,8 @@ export async function listEligibleManagers(role: Role): Promise<UserRow[]> {
   return data
 }
 
-/** A sales head and the people who report to them, for the structure screen. */
-export type ReportingNode = {
-  person: Pick<UserRow, 'id' | 'full_name' | 'email' | 'role' | 'is_active'>
-  reports: ReportingNode[]
-}
-
-/**
- * The organisation as a tree, built from the flat list.
- *
- * Roots are the people whose manager is not in the visible set — the OWNER for an
- * administrator, and the sales head themselves for a sales head — so the tree is
- * always well-formed for whoever is looking at it.
- */
 export async function getReportingStructure(): Promise<ReportingNode[]> {
-  const people = await listPeople()
-
-  const nodes = new Map<string, ReportingNode>(
-    people.map((person) => [
-      person.id,
-      {
-        person: {
-          id: person.id,
-          full_name: person.full_name,
-          email: person.email,
-          role: person.role,
-          is_active: person.is_active,
-        },
-        reports: [],
-      },
-    ]),
-  )
-
-  const roots: ReportingNode[] = []
-  for (const person of people) {
-    const node = nodes.get(person.id)!
-    const parent = person.manager_id ? nodes.get(person.manager_id) : undefined
-    if (parent) parent.reports.push(node)
-    else roots.push(node)
-  }
-  return roots
+  return buildReportingTree(await loadOrganization())
 }
+
+

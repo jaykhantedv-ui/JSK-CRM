@@ -134,6 +134,15 @@ opportunity, activity, dashboard and import services arrive with their features.
 | `lib/supabase/server.ts` | anon + user session | Server Components, Server Actions, services | **Applies** |
 | `lib/supabase/admin.ts` | **service-role** | Cron routes · the import executor · **user provisioning (ADR-009)** | **Bypassed** |
 
+**One PostgREST feature is deliberately not used: embedding a table into itself.**
+`users` references `users` through `manager_id`, and the office server's
+PostgREST 12.2.12 will not expose that relationship — it answers PGRST200 with
+the foreign key present and the schema cache reloaded. The organisation screens
+therefore load three plain, RLS-bounded result sets and join them in
+`lib/organization.ts`, which is pure and testable without a PostgREST at all
+(ADR-041). Hinted embeds between two DIFFERENT tables are unaffected and are used
+throughout, including on every authenticated request.
+
 All three are typed against the generated `Database`, so a query naming a column that does not
 exist fails `tsc` rather than at runtime. That is not cosmetic: it is what caught the ambiguous
 `user_outlets` embed — the table references `users` twice, as the member and as `created_by`, so

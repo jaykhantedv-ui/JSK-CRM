@@ -463,6 +463,34 @@ team's record id reads nothing, because `scoped_owner_ids()` bounds every scoped
 policy. `tests/integration/pilot-organization.test.ts` proves it against the real
 organisation on every commit.
 
+### The People or Reporting Structure page fails with PGRST200
+
+```
+Could not find a relationship between 'users' and 'users' in the schema cache
+```
+
+**Fixed in ADR-041, and it is not a database fault.** The organisation screens
+used to ask PostgREST to embed `users` into itself through `manager_id`, and the
+office server's PostgREST 12.2.12 does not expose a self-referencing relationship
+however many times the schema cache is reloaded. The foreign key is fine —
+checking it, recreating it or reloading the cache will not help, and none of
+those was ever the problem.
+
+The join now happens in the application (`lib/organization.ts`), over three plain
+queries that each carry their own row-level security. If this error appears
+again, the server is running a checkout older than ADR-041:
+
+```bash
+cd /opt/jsk-crm && git log --oneline -1     # is ADR-041 in it?
+git pull && deploy/start.sh --build
+```
+
+No migration is involved: 031 is unchanged and does not need reapplying.
+
+**Never fix this with a `SECURITY DEFINER` function or a view over `users`.** Both
+put the authorization rule in a second place, and a view without
+`security_invoker` bypasses row-level security entirely (§25).
+
 ### A screen says "This screen is not part of your role"
 
 Working as intended. `/dashboard`, `/team`, `/reports` and `/settings` are not a
