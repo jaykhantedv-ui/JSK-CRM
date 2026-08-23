@@ -993,3 +993,53 @@ neither was silently "fixed" (§28):
 |---|---|
 | `material_types` is `[]` | An empty list removes a field's options from every enquiry form, which looks like a bug to a salesperson. **RESOLVED 2026-08-20** — the Project Owner amended TODO-BD-04 and migration `030_material_types_seed.sql` seeds the launch taxonomy. Still editable at `/settings`, still no product catalogue. |
 | One MANAGER has no outlet scope | Correct and deliberate — ADR-016 makes a manager with an empty scope see only their own records, which is safe by default for a newly created manager. Reported so it is a decision rather than an oversight. |
+
+---
+
+## B-14 — "My Day" and "Today" are listed as two salesperson screens
+
+**Raised:** 2026-08-23 (pilot organisation brief) · **Status:** implemented under a
+stated reading, open for confirmation
+
+The pilot brief lists a salesperson's navigation as *Today · Customers · Contacts ·
+Pipeline · Projects · My Day · My Targets* — **Today and My Day both**, with no
+statement of how they differ. §13.2 defines `/today` and the specification names
+no second screen.
+
+**The reading implemented** (ADR-040): `/today` answers *what is waiting on me*
+across every horizon — overdue, due today, upcoming, missing a next action,
+breaching SLA. `/my-day` answers the narrower end-of-day question, *what did I say
+I would do today and what did I actually do*: the day's due and overdue work
+beside the activities that person logged today. Both read data that already
+exists; neither introduces a metric.
+
+**What is open:** whether the business wants two screens at all, or whether "My
+Day" was another name for `/today`. If it is the latter, delete
+`src/app/(app)/my-day` and the two nav entries — nothing else depends on it.
+
+---
+
+## B-15 — the forbidden reporting shapes list one pair twice
+
+**Raised:** 2026-08-23 (pilot organisation brief) · **Status:** implemented under a
+stated reading
+
+The brief's "Do not allow" list reads: *Salesperson → Salesperson manager ·
+Salesperson → Sales Head relationship · Sales Head → Owner · circular hierarchy ·
+self manager*. The second item forbids the relationship the same brief **requires**
+("A salesperson's Sales Head must be derived from their user.manager_id").
+
+**The reading implemented:** the second bullet duplicates the first — a salesperson
+may not be managed by another salesperson. The rule enforced by
+`guard_user_hierarchy()` is the ladder the rest of the brief states:
+
+```
+SALESPERSON → MANAGER (Sales Head) → ADMIN → OWNER → nobody
+```
+
+which satisfies every other statement in the brief, including "reports to must be
+an ADMIN" for a sales head and "Do NOT make Sales Heads direct reports of the
+Owner". **If a salesperson is instead meant to be placeable directly under an
+administrator, that is a one-line change to `MANAGER_ROLE_FOR` and
+`guard_user_hierarchy()`** — raise it rather than working around it.
+

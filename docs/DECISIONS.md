@@ -839,7 +839,15 @@ business explicitly ruled out.
 
 ### ADR-017 — ADMIN does not receive automatic business-data visibility
 
-**Status:** Accepted · **Date:** 2026-08-19 · **Decided by:** Project Owner
+**Status:** **Superseded by ADR-040 (2026-08-23)** on the READ rule only ·
+**Date:** 2026-08-19 · **Decided by:** Project Owner
+
+> ADR-040 gives ADMIN read of every operational record, because the administrator
+> is the escalation point above the sales heads and cannot supervise teams it
+> cannot see. **The rest of this entry still holds:** ADMIN writes no business
+> data, archives nothing, reassigns nobody and is still not a member of
+> `is_manager_or_above()`. The temporary behaviour below is the record of what
+> the system did before that decision and is deliberately not rewritten.
 **Supersedes:** the "See all records" ✔ for ADMIN in §3.1, and ADMIN's membership of
 `is_manager_or_above()` in §15.1
 **Affects:** Phases 3, 4, and every RLS policy on a business table
@@ -2096,6 +2104,130 @@ exactly one row of application data — the owner it exists to create.
   confirmed address. The account would exist and could not sign in.
 - **Reuse the E2E test's owner credentials.** Rejected: test fixtures must never
   reach production, and a documented address and password is not a credential.
+
+### ADR-040 — The reporting line is the read boundary, and a MANAGER is a "Sales Head"
+
+**Status:** Accepted — **supersedes ADR-017**
+**Date:** 2026-08-23   **Decided by:** Project Owner / Engineering
+
+**Context.** The pilot organisation is one branch, Moolakarai, with three sales
+heads working out of it:
+
+```
+Jay Khanted (OWNER)
+  Vinay Kumar Jain (ADMIN)
+    Pankaj      — Revathi
+    Jainendra   — Thamarai, Ashokji, Deivanai, Kathirvel
+    Dhanendran  — Anandh, Ankur Tiwari, Sathya, Selvi
+```
+
+Outlet scope (ADR-016) cannot express it. `outlet_id in scoped_outlet_ids()` gave
+each of the three sales heads the other two's entire pipeline, because they share
+a branch — and a shared branch was a shared read grant. Nothing short of inventing
+a branch per sales head would have fixed it, which would have corrupted the
+branch data to encode an org chart.
+
+The schema also had no way to say who a person reports to. There was no
+`manager_id`; "team" meant "people posted to the same branch as me".
+
+**Decision.**
+
+1. **One column, no new model.** `users.manager_id`, a self-reference. The
+   organisation is the `users` rows and the line between them — no team table, no
+   group table, no second hierarchy (CLAUDE.md §4).
+
+2. **The line is enforced in the database.** `guard_user_hierarchy()` refuses an
+   illegal pairing on the row being written, an illegal pairing on the rows that
+   report to it (demoting a sales head with a team underneath), a self-manager
+   and a cycle. It also refuses a person changing who they report to unless they
+   are the OWNER or an ADMIN, because the line IS the read boundary:
+
+   | Role | Reports to |
+   |---|---|
+   | SALESPERSON | a MANAGER (sales head) — never another salesperson |
+   | MANAGER | an ADMIN — never the OWNER, never another sales head |
+   | ADMIN | the OWNER |
+   | OWNER | nobody |
+
+3. **A sales head reads their TEAM, not their branch.** Every scoped policy
+   changed from `outlet_id in (select scoped_outlet_ids())` to `owner_id in
+   (select scoped_owner_ids())`, keeping 028's per-query set form so nothing
+   regressed on performance. Outlet scope did not go away — it still decides
+   which branches a person may file against, compare in reporting, and move a
+   record between (`guard_record_scope`, `manages_outlet`).
+
+   A consequence, stated because it is a real change: **a record follows its
+   OWNER's sales head, not its branch.** A deal filed at Chithode by Revathi is
+   Pankaj's to see, and the sales head who holds Chithode does not see it.
+
+4. **ADMIN reads every operational record — this supersedes ADR-017.** ADR-017
+   held that system administration confers no business-data visibility. That is
+   untenable once the administrator is the escalation point above the sales
+   heads: Vinay cannot supervise three teams he cannot see. ADMIN gains SELECT
+   everywhere and `assert_management_access()` now admits it. **It gains no
+   write, no archive, no reassignment and no export** — those stay on the sales
+   hierarchy (`is_manager_or_above()` is unchanged).
+
+5. **A salesperson may read the target set FOR them**, and no other. That is what
+   "My Targets" shows. Branch and company targets stay management planning data
+   (ADR-021).
+
+6. **"Sales Head" is a LABEL, not a role.** The enum value stays `MANAGER`:
+   renaming it would have meant rewriting every policy, every helper and every
+   migration for a word, and would have broken the ledger's append-only rule.
+   `ROLE_LABELS` in `lib/permissions.ts` is the single place the word lives, and
+   the interface never prints the raw enum — the same discipline §2.4 applies to
+   "Revenue".
+
+7. **Three controls, named separately, in this order:**
+
+   | | What it decides | Where |
+   |---|---|---|
+   | Row-level security | what a query returns | migration 031 |
+   | Route authorization | whether a screen renders | `requireRole` and the layout guards |
+   | Navigation | what is worth offering | `nav-items.ts` |
+
+   Remove the second and third and the data is still safe. Remove the first and
+   nothing else matters. `/reports` previously had only a redirect, which reads
+   as a broken link; every gated screen now answers a refusal.
+
+8. **One authorized-branch helper.** `listAuthorizedOutlets()`. Four screens had
+   each written `isOwner(user) ? outlets : outlets.filter(...)` inline, and
+   `outletOptions()` — which feeds every creation form — filtered nothing at all,
+   offering a salesperson branches they could not file against. All of them now
+   call the one helper, which offers only ACTIVE branches; Settings →
+   Organization → Branches is the single screen that shows a closed one.
+
+**Consequences.** The manager-scope integration tests changed, deliberately and
+substantially: they encoded outlet-scope reads, which is the behaviour being
+replaced. Every negative case survived and several were strengthened —
+`tests/integration/pilot-organization.test.ts` asserts the exact thirteen-person
+organisation above, including that each sales head is blind to the other two
+teams while sharing their branch. The fixture users gained a reporting line;
+`dev-fixtures.sql` is development-only and seeds no production data (CLAUDE.md
+§15). No table was added, no role enum changed, no RLS policy was relaxed, and
+`manages_outlet` was kept for the branch-move guard.
+
+The thirteen pilot people are **not** seeded. They are created by the owner
+through Settings → Organization → People, which provisions real Auth accounts
+through the ordinary path (ADR-009), with a temporary password the person
+changes.
+
+**Alternatives considered.**
+- **A branch per sales head.** Rejected: it encodes an org chart in branch data,
+  and the business has one showroom. Reporting by branch would then be
+  meaningless.
+- **Intersect team AND branch for reads.** Rejected: a sales head would lose
+  sight of their own report's deal the moment it moved to another branch, which
+  is a silent blind spot rather than a narrower rule.
+- **A separate `teams` table.** Rejected: a twelfth table for a relationship one
+  column expresses, and two places to keep in step (CLAUDE.md §4).
+- **Rename the enum to SALES_HEAD.** Rejected: every policy, helper and migration
+  would change for a display word, and migrations are append-only once applied
+  (§21.2).
+- **Keep ADR-017 and give the administrator a read-only reporting role.** Rejected:
+  that is a fifth role for one capability, and the capability is exactly "read
+  everything", which OWNER already models.
 
 ---
 

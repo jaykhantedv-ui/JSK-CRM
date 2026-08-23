@@ -32,6 +32,36 @@ export const createOutletSchema = z.object({
 
 export type CreateOutletInput = z.input<typeof createOutletSchema>
 
+/**
+ * THE branch selector. One helper, every screen (ADR-040).
+ *
+ * Before this there was no such thing: `/reports`, the management filter bar and
+ * three creation forms each filtered `listOutlets()` inline, and each of them got
+ * it slightly differently — which is why several branch dropdowns came up empty
+ * on the pilot deployment while others did not.
+ *
+ * Who may work in which branch:
+ *
+ *   OWNER · ADMIN   every ACTIVE branch, by role. Never enumerated as membership,
+ *                   so a branch opened tomorrow appears tomorrow (ADR-016).
+ *   MANAGER         the branches they hold, active ones only.
+ *   SALESPERSON     their own posting.
+ *
+ * **A closed branch is never offered.** Chithode exists for the pilot and is
+ * closed, so it appears in Settings → Organization → Branches — where it is
+ * administered — and in no salesperson's selector.
+ *
+ * This is a convenience, not a control: `accounts_insert` and its siblings decide
+ * what may actually be filed, and a hand-typed branch id gets nowhere (§15).
+ */
+export async function listAuthorizedOutlets(): Promise<OutletRow[]> {
+  const user = await requireUser()
+  const outlets = await listOutlets()
+
+  if (user.role === 'OWNER' || user.role === 'ADMIN') return outlets
+  return outlets.filter((outlet) => user.outletIds.includes(outlet.id))
+}
+
 /** Outlets, newest-inactive last. Every authenticated user may read the list. */
 export async function listOutlets(options?: { includeInactive?: boolean }): Promise<OutletRow[]> {
   await requireUser()

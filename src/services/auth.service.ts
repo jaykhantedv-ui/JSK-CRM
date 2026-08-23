@@ -37,7 +37,7 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
     // The FK hint is required, not cosmetic: `user_outlets` references `users`
     // twice — once as the member, once as `created_by` — so an unhinted embed is
     // ambiguous and PostgREST refuses it.
-    .select('id, email, full_name, role, is_active, user_outlets!user_outlets_user_id_fkey(outlet_id, revoked_at)')
+    .select('id, email, full_name, role, is_active, manager_id, user_outlets!user_outlets_user_id_fkey(outlet_id, revoked_at)')
     .eq('id', authUser.id)
     .maybeSingle()
 
@@ -52,6 +52,7 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
     outletIds: (data.user_outlets ?? [])
       .filter((row) => row.revoked_at === null)
       .map((row) => row.outlet_id),
+    managerId: data.manager_id,
   }
 })
 
@@ -60,6 +61,47 @@ export async function requireUser(): Promise<SessionUser> {
   const user = await getCurrentUser()
   if (!user) throw new AppError('FORBIDDEN', 'Sign in to continue.')
   return user
+}
+
+/**
+ * ROUTE AUTHORIZATION (ADR-040). The second of three controls.
+ *
+ * Hiding a navigation item is not a control and never was: `/reports` was
+ * reachable by typing it, and rendered — an index of eleven links, each of which
+ * then returned nothing, which reads as a broken screen rather than a refusal.
+ * These are what a gated page calls first, so the answer is a refusal.
+ *
+ * The controls, in order of strength:
+ *
+ *   1. row-level security  what a query returns. Holds against a direct
+ *                          PostgREST call with the caller's own JWT (§15).
+ *   2. these               whether the route renders at all.
+ *   3. navigation          what is worth offering.
+ *
+ * Remove 2 and 3 and the data is still safe. Remove 1 and nothing else matters.
+ */
+export async function requireRole(...roles: SessionUser['role'][]): Promise<SessionUser> {
+  const user = await requireUser()
+  if (!roles.includes(user.role)) {
+    throw new AppError('FORBIDDEN', 'This screen is not part of your role.')
+  }
+  return user
+}
+
+/**
+ * The management surfaces: dashboard, team and every report.
+ *
+ * Mirrors `assert_management_access()`, which is the control — a salesperson
+ * calling one of those RPCs directly is refused by the database whatever this
+ * does.
+ */
+export async function requireManagementAccess(): Promise<SessionUser> {
+  return requireRole('MANAGER', 'OWNER', 'ADMIN')
+}
+
+/** Organisation and configuration: branches, people, settings, import. */
+export async function requireOwnerOrAdmin(): Promise<SessionUser> {
+  return requireRole('OWNER', 'ADMIN')
 }
 
 /** Sign in with email and password. Rate limiting is Supabase Auth's own (C-5). */

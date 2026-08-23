@@ -436,6 +436,44 @@ This deployment already has an active OWNER: owner@example.com
 Full procedure and exit codes: `/docs/DEPLOYMENT.md` §10.6. Design and the reason
 this is a script rather than a first-run web page: ADR-039.
 
+### Somebody sees the wrong pipeline
+
+Almost always the reporting line, not a policy. A **Sales Head** reads their own
+records and their **direct reports'** — never their branch, and never another
+sales head's team (ADR-040).
+
+```
+Settings → Organization → Reporting Structure
+```
+
+That tree IS the authorization model. Read it back against who should be seeing
+what; a person under the wrong sales head is a person seeing the wrong pipeline,
+and moving them on the **People** tab moves their work with them immediately.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A sales head sees nothing | nobody reports to them | People → set each salesperson's "Reports to" |
+| A sales head sees another team's deals | somebody is under the wrong person | People → correct "Reports to" |
+| A deal is missing from a sales head's list | it belongs to a salesperson on another team | correct by owner, not by branch — a record follows its owner |
+| A salesperson has no branch in a form | they hold no branch | People → tick a branch. Closed branches are never offered |
+| A branch is missing from every selector | it is Closed | Organization → Branches → Reopen |
+
+**The database is the control, not the screen.** A sales head who types another
+team's record id reads nothing, because `scoped_owner_ids()` bounds every scoped
+policy. `tests/integration/pilot-organization.test.ts` proves it against the real
+organisation on every commit.
+
+### A screen says "This screen is not part of your role"
+
+Working as intended. `/dashboard`, `/team`, `/reports` and `/settings` are not a
+salesperson's, and `/settings/organization/*` is the owner's and the
+administrator's alone. It is a refusal rather than a redirect on purpose — a
+redirect is indistinguishable from a broken link.
+
+If somebody should have it, their role is wrong: Settings → Organization →
+People. Changing a role never changes what they can already see through
+ownership.
+
 ### Is it actually working?
 
 ```bash

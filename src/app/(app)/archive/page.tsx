@@ -40,7 +40,11 @@ type SearchParams = Promise<{ entity?: string; page?: string }>
  */
 export default async function ArchivePage({ searchParams }: { searchParams: SearchParams }) {
   const user = await requireUser()
-  if (!canArchive(user)) return <ForbiddenState />
+  if (!canArchive(user)) return (
+      <ForbiddenState title="This screen is not part of your role"
+      description="Ask the owner or an administrator if you need it."
+      />
+    )
 
   const params = await searchParams
   const entity = (ARCHIVABLE_ENTITIES as readonly string[]).includes(params.entity ?? '')

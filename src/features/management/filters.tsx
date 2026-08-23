@@ -1,7 +1,6 @@
 import { ScopeBar } from '@/features/management/scope-bar'
-import { isOwner } from '@/lib/permissions'
 import { requireUser } from '@/services/auth.service'
-import { listOutlets } from '@/services/outlet.service'
+import { listAuthorizedOutlets } from '@/services/outlet.service'
 import { getTeamWorkload } from '@/services/analytics.service'
 import type { Period } from '@/lib/period'
 
@@ -29,15 +28,15 @@ export async function ManagementFilters({
   showPeople?: boolean
   showPeriod?: boolean
 }) {
-  const user = await requireUser()
-  const [outlets, team] = await Promise.all([
-    listOutlets(),
+  await requireUser()
+  const [mine, team] = await Promise.all([
+    listAuthorizedOutlets(),
     showPeople ? getTeamWorkload(period) : Promise.resolve([]),
   ])
 
-  const mine = isOwner(user)
-    ? outlets
-    : outlets.filter((outlet) => user.outletIds.includes(outlet.id))
+  // `listAuthorizedOutlets()` already answers "which branches may this person
+  // work in" (ADR-040). Filtering again here is how four screens ended up with
+  // four slightly different answers.
 
   return (
     <ScopeBar

@@ -7,6 +7,7 @@ import { DemoBanner } from '@/components/layout/demo-banner'
 import { SECONDARY_NAV, visibleFor } from '@/components/layout/nav-items'
 import { Sidebar } from '@/components/layout/sidebar'
 import { GlobalSearch } from '@/components/layout/top-bar'
+import { roleLabel } from '@/lib/permissions'
 import { getCurrentUser } from '@/services/auth.service'
 
 /**
@@ -62,7 +63,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               <div className="absolute right-0 z-30 mt-2 w-56 rounded-md border border-border bg-popover p-3 shadow-lg">
                 <p className="text-sm font-medium">{user.fullName}</p>
                 <p className="text-xs text-muted-foreground">{user.email}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{user.role}</p>
+                {/* Never the raw enum: the database role is MANAGER, and the
+                    business — and every screen — calls that person a Sales Head
+                    (ADR-040). */}
+                <p className="mt-1 text-xs text-muted-foreground">{roleLabel(user.role)}</p>
                 <form action={logoutAction} className="mt-3">
                   <button type="submit" className="text-sm underline underline-offset-4">
                     Sign out

@@ -9,13 +9,21 @@ import {
   asUser,
   canSee,
   connect,
+  expectRejected,
   updateRowCount,
   visibleIds,
   type Db,
 } from './harness'
 
 /**
- * Outlet scope and the role model, at the database boundary (ADR-016, ADR-017).
+ * The reporting line, outlet scope and the role model, at the database boundary
+ * (ADR-016, ADR-040).
+ *
+ * **What a sales head may READ is their team, not their branch.** ADR-040 made
+ * that change because the business runs three sales heads out of one branch, and
+ * outlet scope gave every one of them the other two's pipeline. Outlet scope did
+ * not go away: it still decides which branches a person may file a record
+ * against, compare in reporting, and move a record between.
  *
  * **Every assertion here is made AS THE RESTRICTED ROLE.** Verifying a permission
  * as OWNER proves nothing — OWNER passes everything (§23) — so the OWNER tests
@@ -32,7 +40,7 @@ afterAll(async () => {
   await db?.end()
 })
 
-describe('manager outlet scope', () => {
+describe('sales head team scope (ADR-040)', () => {
   it('a manager assigned to outlet A sees outlet A records', async () => {
     await asUser(db, USERS.managerA, async (tx) => {
       expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA1)).toBe(true)
@@ -51,21 +59,30 @@ describe('manager outlet scope', () => {
     })
   })
 
-  it('a manager assigned to outlet A CANNOT see outlet C records either', async () => {
+  it('a sales head follows their report into another branch', async () => {
+    // sales.a1 is posted to branch A and owns work at branch C. It is still
+    // their sales head's to see: the record follows its OWNER, not its branch.
     await asUser(db, USERS.managerA, async (tx) => {
-      expect(await canSee(tx, 'accounts', ACCOUNTS.cOwnedByA1)).toBe(false)
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'accounts', ACCOUNTS.cOwnedByA1)).toBe(true)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
     })
   })
 
-  it('a manager assigned to A and C sees both, and still not B', async () => {
+  it('TWO SALES HEADS IN ONE BRANCH ARE TWO TEAMS', async () => {
+    // The defect ADR-040 exists to close, stated directly. manager.ac holds
+    // branch A — the same branch manager.a's whole team works in — and manages
+    // none of them. Under outlet scope they read every one of these rows.
     await asUser(db, USERS.managerAC, async (tx) => {
-      expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA1)).toBe(true)
-      expect(await canSee(tx, 'accounts', ACCOUNTS.cOwnedByA1)).toBe(true)
-      expect(await canSee(tx, 'accounts', ACCOUNTS.bOwnedByB1)).toBe(false)
+      expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA2)).toBe(false)
+      expect(await canSee(tx, 'accounts', ACCOUNTS.cOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.aOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'projects', PROJECTS.aOwnedByA1)).toBe(false)
 
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.bOwnedByB1)).toBe(false)
+      // Their own report's work, at a branch they do not even hold, they do see.
+      expect(await canSee(tx, 'accounts', ACCOUNTS.bOwnedByB1)).toBe(true)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.bOwnedByB1)).toBe(true)
     })
   })
 
@@ -78,40 +95,59 @@ describe('manager outlet scope', () => {
     })
   })
 
-  it("a record's outlet decides scope, not the owner's posting", async () => {
-    // salesA1 is posted to outlet A but owns an opportunity in outlet C. The
-    // outlet-C manager must see it; the outlet-A manager must not.
+  it("the OWNER's sales head decides scope, not the record's branch", async () => {
+    // The same opportunity, asked of two sales heads. It sits at branch C, which
+    // manager.ac holds and manager.a does not — and it belongs to manager.a,
+    // because sales.a1 does.
     await asUser(db, USERS.managerA, async (tx) => {
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
     })
     await asUser(db, USERS.managerAC, async (tx) => {
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
     })
   })
 
-  it('revoking an outlet assignment removes the manager from that scope', async () => {
+  it('moving a person to another sales head moves their work with them', async () => {
     await asUser(db, USERS.managerAC, async (tx) => {
-      expect(await canSee(tx, 'accounts', ACCOUNTS.cOwnedByA1)).toBe(true)
+      expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA1)).toBe(false)
     })
 
     await asUser(db, null, async (tx) => {
-      // Arrange as the database owner: this models the OWNER/ADMIN moving a
-      // manager between outlets, which is an administrative write, not the thing
-      // under test.
+      // Arrange as the database owner: reassigning a person's reporting line is
+      // an administrative write by the OWNER or ADMIN, not the thing under test.
       await tx.query('reset role')
-      await tx.query(
-        `update public.user_outlets set revoked_at = now()
-         where user_id = $1 and outlet_id = $2 and revoked_at is null`,
-        [USERS.managerAC, OUTLETS.c],
-      )
+      await tx.query(`update public.users set manager_id = $2 where id = $1`, [
+        USERS.salesA1,
+        USERS.managerAC,
+      ])
       await tx.query('set local role authenticated')
       await tx.query('select set_config($1, $2, true)', [
         'request.jwt.claims',
         JSON.stringify({ sub: USERS.managerAC, role: 'authenticated' }),
       ])
 
-      expect(await canSee(tx, 'accounts', ACCOUNTS.cOwnedByA1)).toBe(false)
       expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA1)).toBe(true)
+      // sales.a2 did not move, so their work did not either.
+      expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA2)).toBe(false)
+    })
+  })
+
+  it('a sales head cannot move a person onto their own team', async () => {
+    // The reporting line is the read boundary, so being able to edit it would be
+    // the whole authorization model in one UPDATE. Refused by the USING clause
+    // of `users_admin_update`, which means zero rows rather than an error — the
+    // quiet half of "refused" that a rejects-only assertion would miss.
+    await asUser(db, USERS.managerAC, async (tx) => {
+      expect(
+        await updateRowCount(tx, `update public.users set manager_id = $2 where id = $1`, [
+          USERS.salesA1,
+          USERS.managerAC,
+        ]),
+      ).toBe(0)
+    })
+
+    await asUser(db, USERS.managerAC, async (tx) => {
+      expect(await canSee(tx, 'accounts', ACCOUNTS.aOwnedByA1)).toBe(false)
     })
   })
 })
@@ -206,14 +242,38 @@ describe('salesperson ownership and work context', () => {
     // `role` to the role they already hold — so the escalation is refused while
     // an ordinary profile edit still works.
     await asUser(db, USERS.salesA1, async (tx) => {
+      // Two independent controls refuse this now, and the hierarchy guard
+      // happens to answer first — a BEFORE trigger runs ahead of the policy's
+      // WITH CHECK. Either way the role does not move.
       await expect(
         tx.query(`update public.users set role = 'OWNER' where id = $1`, [USERS.salesA1]),
-      ).rejects.toMatchObject({ code: '42501' })
+      ).rejects.toMatchObject({ code: expect.stringMatching(/42501|23514/) })
     })
 
     await asUser(db, USERS.salesA1, async (tx) => {
       const { rows } = await tx.query('select role from public.users where id = $1', [USERS.salesA1])
       expect(rows[0].role).toBe('SALESPERSON')
+    })
+  })
+
+  it('and RLS refuses it on its own, with the hierarchy guard out of the way', async () => {
+    // The point of the previous test is that the role does not move. The point of
+    // this one is WHICH control stops it: with a legal reporting line for the
+    // role being attempted, `users_update_self`'s WITH CHECK is the only thing
+    // left, and it must still refuse. Without this, deleting that clause would
+    // leave the suite green.
+    await asUser(db, null, async (tx) => {
+      await tx.query('reset role')
+      await tx.query(`update public.users set manager_id = null where id = $1`, [USERS.salesA1])
+      await tx.query('set local role authenticated')
+      await tx.query('select set_config($1, $2, true)', [
+        'request.jwt.claims',
+        JSON.stringify({ sub: USERS.salesA1, role: 'authenticated' }),
+      ])
+
+      await expect(
+        tx.query(`update public.users set role = 'MANAGER' where id = $1`, [USERS.salesA1]),
+      ).rejects.toMatchObject({ code: '42501' })
     })
   })
 
@@ -256,14 +316,37 @@ describe('owner and admin', () => {
     })
   })
 
-  it('an admin gets NO automatic business-data visibility', async () => {
+  it('an admin READS every operational record (ADR-040, superseding ADR-017)', async () => {
+    // The administrator is the escalation point above the sales heads. It cannot
+    // be that while unable to see their work — which is what ADR-017 required.
     await asUser(db, USERS.admin, async (tx) => {
-      expect(await visibleIds(tx, 'accounts')).toEqual([])
-      expect(await visibleIds(tx, 'opportunities')).toEqual([])
-      expect(await visibleIds(tx, 'projects')).toEqual([])
-      expect(await visibleIds(tx, 'contacts')).toEqual([])
-      expect(await visibleIds(tx, 'activities')).toEqual([])
-      expect(await visibleIds(tx, 'opportunity_events')).toEqual([])
+      expect((await visibleIds(tx, 'accounts')).length).toBeGreaterThan(0)
+      expect((await visibleIds(tx, 'opportunities')).length).toBeGreaterThan(0)
+      expect((await visibleIds(tx, 'projects')).length).toBeGreaterThan(0)
+      expect((await visibleIds(tx, 'contacts')).length).toBeGreaterThan(0)
+      expect((await visibleIds(tx, 'activities')).length).toBeGreaterThan(0)
+    })
+  })
+
+  it('an admin still WRITES no business data', async () => {
+    // Read is the whole of what ADR-040 gave it. Creating, archiving and
+    // reassigning stay on the sales hierarchy.
+    await asUser(db, USERS.admin, async (tx) => {
+      const error = await expectRejected(
+        tx,
+        `insert into public.accounts (name, account_type, phone, owner_id, outlet_id)
+         values ('Admin Should Not Create', 'HOMEOWNER', '+91 90000 00001', $1, $2)`,
+        [USERS.salesA1, OUTLETS.a],
+      )
+      expect(error.code).toBe('42501')
+
+      expect(
+        await updateRowCount(
+          tx,
+          `update public.opportunities set title = 'Admin edit' where id = $1`,
+          [OPPORTUNITIES.aOwnedByA1],
+        ),
+      ).toBe(0)
     })
   })
 

@@ -40,6 +40,28 @@ update public.users set role = 'ADMIN'   where email = 'admin@jsk.test';
 update public.users set role = 'MANAGER' where email in ('manager.a@jsk.test','manager.ac@jsk.test','manager.none@jsk.test');
 update public.users set is_active = false where email = 'sales.gone@jsk.test';
 
+-- The reporting line (ADR-040), set after the roles for the same reason the roles
+-- are set after the rows: `guard_user_hierarchy()` checks the manager's role, so
+-- the manager has to already have it. Top-down, one level at a time.
+--
+--   owner
+--     admin
+--       manager.a   -> sales.a1, sales.a2, sales.gone
+--       manager.ac  -> sales.b1
+--       manager.none-> nobody
+--
+-- manager.a and manager.ac BOTH hold outlet A. Under outlet scope that made them
+-- each other's managers; under the reporting line they are two separate teams,
+-- which is exactly the case the pilot has three of.
+update public.users set manager_id = (select id from public.users where email = 'owner@jsk.test')
+ where email = 'admin@jsk.test';
+update public.users set manager_id = (select id from public.users where email = 'admin@jsk.test')
+ where email in ('manager.a@jsk.test','manager.ac@jsk.test','manager.none@jsk.test');
+update public.users set manager_id = (select id from public.users where email = 'manager.a@jsk.test')
+ where email in ('sales.a1@jsk.test','sales.a2@jsk.test','sales.gone@jsk.test');
+update public.users set manager_id = (select id from public.users where email = 'manager.ac@jsk.test')
+ where email = 'sales.b1@jsk.test';
+
 insert into public.outlets (id, code, name, city) values
   ('00000000-0000-4000-8000-000000002001','ERD','Erode Main','Erode'),
   ('00000000-0000-4000-8000-000000002002','PRN','Perundurai','Perundurai'),

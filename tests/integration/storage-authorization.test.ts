@@ -130,13 +130,15 @@ describe('reading (§19.4 — no visibility of the parent, no file)', () => {
     }
   })
 
-  it('an ADMIN sees NO business files (ADR-017)', async () => {
+  it('an ADMIN sees business files, because it can see the records (ADR-040)', async () => {
     await db.query('begin')
     try {
       await seedObjects()
-      // ADMIN administers users, outlets, settings and imports. It carries no
-      // automatic right to read the pipeline — or its attachments.
-      expect(await visibleTo(USERS.admin)).toEqual([])
+      // Storage visibility is derived from the parent entity, never restated —
+      // so widening ADMIN's read of accounts and opportunities widens this too,
+      // automatically and by construction. That is the property worth pinning:
+      // if these ever disagree, one of them has grown its own copy of the rule.
+      expect((await visibleTo(USERS.admin)).length).toBeGreaterThan(0)
     } finally {
       await db.query('rollback')
       await db.query('reset role')

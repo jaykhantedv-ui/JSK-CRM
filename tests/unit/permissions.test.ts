@@ -5,6 +5,7 @@ import {
   canEditSettings,
   canExportCsv,
   canImportCsv,
+  canManageOrganization,
   canManageUsers,
   canReadRecord,
   canReassign,
@@ -87,8 +88,12 @@ describe('outlet scope', () => {
     expect(managesOutlet(OWNER, 'outlet-j')).toBe(true)
   })
 
-  it('an admin has no outlet scope', () => {
-    expect(managesOutlet(ADMIN, OUTLET_A)).toBe(false)
+  it('an admin may work in every branch, by role (ADR-040)', () => {
+    // It administers the branches and compares their numbers, so it is
+    // company-wide the way the OWNER is — never enumerated as membership, so a
+    // branch opened tomorrow is in scope tomorrow.
+    expect(managesOutlet(ADMIN, OUTLET_A)).toBe(true)
+    expect(managesOutlet(ADMIN, 'outlet-j')).toBe(true)
   })
 
   it("a salesperson's posting does not widen their reads", () => {
@@ -109,14 +114,29 @@ describe('canReadRecord', () => {
     expect(canReadRecord(SALESPERSON, recordInA)).toBe(false)
   })
 
-  it('lets a manager read their outlet and not another', () => {
-    expect(canReadRecord(MANAGER_A, recordInA)).toBe(true)
-    expect(canReadRecord(MANAGER_A, recordInB)).toBe(false)
+  it('lets a sales head read their team’s work and no other team’s (ADR-040)', () => {
+    // The third argument is the caller's direct reports. A record belongs to a
+    // sales head because its OWNER does — not because it was filed at a branch
+    // they hold, which is what three sales heads in one branch made unworkable.
+    expect(canReadRecord(MANAGER_A, recordInA, ['someone-else'])).toBe(true)
+    expect(canReadRecord(MANAGER_A, recordInA, [])).toBe(false)
+    // Their report's work at a branch this sales head does not hold — still
+    // theirs, because the record follows its owner.
+    expect(canReadRecord(MANAGER_A, recordInB, ['someone-else'])).toBe(true)
   })
 
-  it('lets the owner read everything and the admin nothing', () => {
+  it('does not let a branch stand in for a team', () => {
+    // recordInA sits in the sales head's own branch and belongs to somebody
+    // else's report. Before ADR-040 this was `true`, and it is the defect.
+    expect(
+      canReadRecord(MANAGER_A, { owner_id: 'other-team', outlet_id: OUTLET_A }, ['someone-else']),
+    ).toBe(false)
+  })
+
+  it('lets the owner and the administrator read everything (ADR-040)', () => {
     expect(canReadRecord(OWNER, recordInB)).toBe(true)
-    expect(canReadRecord(ADMIN, recordInA)).toBe(false)
+    expect(canReadRecord(ADMIN, recordInA)).toBe(true)
+    expect(canReadRecord(ADMIN, recordInB)).toBe(true)
   })
 
   it('refuses a deactivated user, whatever their role', () => {
@@ -137,10 +157,18 @@ describe('the capability matrix (§3.1)', () => {
     ['import CSV', canImportCsv, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
     ['manage users', canManageUsers, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
     ['edit settings', canEditSettings, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
+    // ADR-040: the administrator reads every operational record, so a report it
+    // could assemble row by row is not withheld. It still archives, reassigns
+    // and exports nothing.
     [
       'team dashboard',
       canViewTeamDashboard,
-      { SALESPERSON: false, MANAGER: true, OWNER: true, ADMIN: false },
+      { SALESPERSON: false, MANAGER: true, OWNER: true, ADMIN: true },
+    ],
+    [
+      'manage organization',
+      canManageOrganization,
+      { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true },
     ],
   ] as Array<
     [string, (u: CurrentUser | null) => boolean, Record<'SALESPERSON' | 'MANAGER' | 'OWNER' | 'ADMIN', boolean>]
@@ -162,7 +190,7 @@ describe('landing routes (§12.2)', () => {
     ['SALESPERSON', '/today'],
     ['MANAGER', '/dashboard'],
     ['OWNER', '/dashboard'],
-    ['ADMIN', '/settings'],
+    ['ADMIN', '/dashboard'],
   ] as const)('a %s lands on %s', (role, route) => {
     expect(landingRouteFor(role)).toBe(route)
   })

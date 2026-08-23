@@ -71,15 +71,17 @@ describe('outlet scope (ADR-016)', () => {
     })
   })
 
-  it('a manager with two outlets sees both and no more', async () => {
+  it('a sales head sees their team and no other, whatever branch they hold', async () => {
+    // manager.ac holds branches A and C and manages only sales.b1, who works at
+    // branch B. Holding a branch is not a read grant (ADR-040).
     await asUser(db, USERS.managerAC, async (tx) => {
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.aOwnedByA1)).toBe(true)
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.bOwnedByB1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.aOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.bOwnedByB1)).toBe(true)
     })
   })
 
-  it('a manager with no outlets sees only their own records', async () => {
+  it('a sales head with no team sees only their own records', async () => {
     await asUser(db, USERS.managerNone, async (tx) => {
       const { rows } = await tx.query('select count(*)::int as n from public.opportunities')
       expect(rows[0].n).toBe(0)
@@ -94,23 +96,24 @@ describe('outlet scope (ADR-016)', () => {
     })
   })
 
-  it('ADMIN gets no business data at all (ADR-017)', async () => {
+  it('ADMIN reads every operational table (ADR-040, superseding ADR-017)', async () => {
     await asUser(db, USERS.admin, async (tx) => {
       for (const table of ['accounts', 'opportunities', 'projects', 'contacts', 'activities']) {
         const { rows } = await tx.query(`select count(*)::int as n from public.${table}`)
-        expect({ table, n: rows[0].n }).toEqual({ table, n: 0 })
+        expect({ table, empty: rows[0].n === 0 }).toEqual({ table, empty: false })
       }
     })
   })
 
-  it('record scope follows the record’s outlet, not the owner’s posting', async () => {
-    // The opportunity in outlet C is owned by a salesperson posted to outlet A.
-    // The manager of A must not see it; the manager of A+C must.
+  it('record scope follows the OWNER’s sales head, not the record’s branch', async () => {
+    // The opportunity in branch C is owned by a salesperson who reports to
+    // manager.a. manager.a sees it; manager.ac, who holds branch C and manages
+    // nobody in it, does not (ADR-040).
     await asUser(db, USERS.managerA, async (tx) => {
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
     })
     await asUser(db, USERS.managerAC, async (tx) => {
-      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(true)
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.cOwnedByA1)).toBe(false)
     })
   })
 })
@@ -198,8 +201,8 @@ describe('assignment and reassignment (§11.9)', () => {
     await asUser(db, USERS.managerA, async (tx) => {
       await tx.query('select public.reassign_opportunity($1,$2,$3)', [
         OPPORTUNITIES.aOwnedByA1,
-        USERS.salesB1,
-        'moved to the other branch team',
+        USERS.salesA2,
+        'moved to a colleague on the same team',
       ])
 
       // Same transaction, now reading as the previous owner.
@@ -208,6 +211,24 @@ describe('assignment and reassignment (§11.9)', () => {
         JSON.stringify({ sub: USERS.salesA1, role: 'authenticated' }),
       ])
       expect(await canSee(tx, 'opportunities', OPPORTUNITIES.aOwnedByA1)).toBe(false)
+    })
+  })
+
+  it('a sales head cannot hand work to another sales head’s salesperson', async () => {
+    // The new owner has to be readable to the caller too, or the WITH CHECK
+    // fails: a sales head may move work around their own team and no further.
+    // Handing a deal across teams is the administrator's or the owner's call.
+    await asUser(db, USERS.managerA, async (tx) => {
+      const error = await expectRejected(tx, 'select public.reassign_opportunity($1,$2,$3)', [
+        OPPORTUNITIES.aOwnedByA1,
+        USERS.salesB1,
+        'attempting to cross teams',
+      ])
+      expect(error.code).toBe('42501')
+    })
+
+    await asUser(db, USERS.salesA1, async (tx) => {
+      expect(await canSee(tx, 'opportunities', OPPORTUNITIES.aOwnedByA1)).toBe(true)
     })
   })
 

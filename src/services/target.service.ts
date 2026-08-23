@@ -114,6 +114,30 @@ export async function listTargets(
 }
 
 /**
+ * The caller's OWN targets — the only ones a salesperson may read (ADR-040).
+ *
+ * `listTargets` above is gated to management because a branch target and the
+ * company figure are management planning data (ADR-021), and that has not
+ * changed. What ADR-040 changed is the one row set FOR this person: they are
+ * measured against it, so they can see it. `sales_targets_select` is what
+ * actually decides, and it grants exactly `user_id = current_user_id()`.
+ */
+export async function listMyTargets(period: Period): Promise<SalesTarget[]> {
+  const user = await requireUser()
+  const supabase = await createSupabaseServerClient()
+
+  const { data, error } = await supabase
+    .from('sales_targets')
+    .select('id, period_month, outlet_id, user_id, target_paise, note')
+    .eq('user_id', user.id)
+    .in('period_month', monthsInPeriod(period))
+    .order('period_month')
+
+  if (error) throw fromPostgrestError(error)
+  return (data ?? []).map(toTarget)
+}
+
+/**
  * Every target for a month, whatever its scope — the maintenance screen's list.
  *
  * RLS decides what comes back: a manager sees their branches' targets and their

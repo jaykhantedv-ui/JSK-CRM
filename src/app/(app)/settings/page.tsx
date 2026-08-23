@@ -1,6 +1,10 @@
 import type { Metadata } from 'next'
 
+import Link from 'next/link'
+
 import { ForbiddenState } from '@/components/shared/states'
+import { buttonClass } from '@/components/ui/button'
+import { toRoute } from '@/lib/routes'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDateTime } from '@/lib/dates'
 import { formatPaise } from '@/lib/money'
@@ -88,7 +92,10 @@ const FIELDS: {
 
 export default async function SettingsPage() {
   const user = await requireUser()
-  if (!canEditSettings(user)) return <ForbiddenState backHref="/today" />
+  if (!canEditSettings(user)) return <ForbiddenState
+      backHref="/today" title="This screen is not part of your role"
+      description="Ask the owner or an administrator if you need it."
+    />
 
   const settings = await getAllSettings()
 
@@ -103,6 +110,30 @@ export default async function SettingsPage() {
           These values take effect immediately. Nothing here needs a deployment.
         </p>
       </header>
+
+      {/* The organisation itself — branches, people and the reporting line — is
+          three screens of its own rather than a section here: it is the
+          authorization model, not a threshold (ADR-040). */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Organization</CardTitle>
+        </CardHeader>
+        <CardBody className="pt-0">
+          <ul className="flex flex-wrap gap-2">
+            {[
+              ['/settings/organization/branches', 'Branches'],
+              ['/settings/organization/people', 'People'],
+              ['/settings/organization/structure', 'Reporting Structure'],
+            ].map(([href, label]) => (
+              <li key={href}>
+                <Link href={toRoute(href)} className={buttonClass('secondary', 'sm')}>
+                  {label}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </CardBody>
+      </Card>
 
       <Card>
         <CardHeader>

@@ -75,7 +75,9 @@ else ok "page scripts carry a nonce"; fi
 
 echo
 echo "Authorization boundary (§9, §24)"
-for path in /today /dashboard /accounts /settings /team /reports; do
+for path in /today /dashboard /accounts /settings /team /reports /my-day /my-targets \
+            /settings/organization/people /settings/organization/branches \
+            /settings/organization/structure; do
   LOC=$(hdrs "$BASE$path" | grep -i '^location:' | tr -d '\r' | sed 's/^[Ll]ocation: *//')
   # Next.js parses the Location header back into a URL and rejects a relative one,
   # so middleware always answers with an absolute address. What matters is the

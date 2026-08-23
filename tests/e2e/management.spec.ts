@@ -198,3 +198,107 @@ test.describe('Management intelligence', () => {
     expect([404, 400]).toContain(response.status())
   })
 })
+
+/**
+ * Direct-URL authorization (ADR-040).
+ *
+ * **Typing the address is the test.** Hiding a navigation item proves nothing —
+ * that is the whole point of stating the three controls separately — so each
+ * screen below is opened by URL, with no link involved, and must answer a
+ * refusal rather than an empty page.
+ *
+ * Skipped in this environment for the same reason as everything above, and
+ * backed by `tests/integration/pilot-organization.test.ts`, which proves the
+ * database refuses the same callers whatever the browser does.
+ */
+test.describe('direct URL access, by role', () => {
+  test.skip(
+    !AUTH_READY,
+    'Supabase Auth is unreachable in this environment (ADR-018). The database half of every ' +
+      'rule below runs on every commit in tests/integration/pilot-organization.test.ts.',
+  )
+
+  async function signIn(page: Page, who: { email: string; password: string }) {
+    await page.goto('/login')
+    await page.getByLabel('Email').fill(who.email)
+    await page.getByLabel('Password').fill(who.password)
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    await page.waitForURL(/\/(today|dashboard)/)
+  }
+
+  const REFUSED_FOR_SALESPERSON = [
+    '/reports',
+    '/reports/pipeline',
+    '/dashboard',
+    '/team',
+    '/settings',
+    '/settings/organization/people',
+    '/settings/organization/branches',
+    '/settings/organization/structure',
+  ]
+
+  for (const path of REFUSED_FOR_SALESPERSON) {
+    test(`a salesperson typing ${path} is refused`, async ({ page }) => {
+      await signIn(page, SALESPERSON)
+      await page.goto(path)
+      await expect(page.getByText(/not part of your role|don't have access/i)).toBeVisible()
+    })
+  }
+
+  const REFUSED_FOR_SALES_HEAD = [
+    '/settings',
+    '/settings/organization/people',
+    '/settings/organization/branches',
+    '/settings/organization/structure',
+  ]
+
+  for (const path of REFUSED_FOR_SALES_HEAD) {
+    test(`a sales head typing ${path} is refused`, async ({ page }) => {
+      // Reporting is theirs; administering the organisation is not.
+      await signIn(page, MANAGER)
+      await page.goto(path)
+      await expect(page.getByText(/not part of your role|don't have access/i)).toBeVisible()
+    })
+  }
+
+  test('a sales head reaches Team and Reports', async ({ page }) => {
+    await signIn(page, MANAGER)
+    for (const path of ['/team', '/reports']) {
+      await page.goto(path)
+      await expect(page.getByText(/not part of your role|don't have access/i)).toHaveCount(0)
+    }
+  })
+
+  test('an administrator reaches the organisation screens and the reports', async ({ page }) => {
+    await signIn(page, ADMIN)
+    for (const path of ['/settings/organization/people', '/reports', '/dashboard']) {
+      await page.goto(path)
+      await expect(page.getByText(/not part of your role|don't have access/i)).toHaveCount(0)
+    }
+  })
+
+  test('the owner reaches everything', async ({ page }) => {
+    await signIn(page, OWNER)
+    for (const path of ['/dashboard', '/team', '/reports', '/settings/organization/structure']) {
+      await page.goto(path)
+      await expect(page.getByText(/not part of your role|don't have access/i)).toHaveCount(0)
+    }
+  })
+
+  test('a salesperson sees My Day and My Targets, and a sales head does not', async ({ page }) => {
+    await signIn(page, SALESPERSON)
+    await expect(page.getByRole('link', { name: 'My Targets' })).toBeVisible()
+
+    await page.goto('/my-targets')
+    await expect(page.getByRole('heading', { name: 'My Targets' })).toBeVisible()
+  })
+
+  test('the branch selector never offers a branch the caller cannot work in', async ({ page }) => {
+    // The pilot's second branch is created and closed, so it must appear on the
+    // Branches screen — where it is administered — and in no creation form.
+    await signIn(page, SALESPERSON)
+    await page.goto('/accounts/new')
+    const options = await page.locator('select[name="outletId"] option').allTextContents()
+    expect(options.join(' ')).not.toMatch(/chithode/i)
+  })
+})

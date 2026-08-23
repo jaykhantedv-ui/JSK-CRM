@@ -1,10 +1,9 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
-import { redirect } from 'next/navigation'
 import { Suspense } from 'react'
 
 import { MoneyText } from '@/components/shared/money-text'
-import { SkeletonRows } from '@/components/shared/states'
+import { ForbiddenState, SkeletonRows } from '@/components/shared/states'
 import { buttonClass } from '@/components/ui/button'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { Column, DataTable } from '@/features/management/data-table'
@@ -12,14 +11,13 @@ import { MetricTile } from '@/features/management/metric-tile'
 import { ScopeBar } from '@/features/management/scope-bar'
 import { formatDate, relativeDays } from '@/lib/dates'
 import { formatCount, formatPercent } from '@/lib/metrics'
-import { isManagerOrAbove, isOwner } from '@/lib/permissions'
+import { canViewTeamDashboard } from '@/lib/permissions'
 import { parsePeriod, type Period } from '@/lib/period'
 import { toRoute } from '@/lib/routes'
 import type { TeamMemberWorkload } from '@/services/analytics.service'
 import { requireUser } from '@/services/auth.service'
-import { listOutlets } from '@/services/outlet.service'
+import { listAuthorizedOutlets } from '@/services/outlet.service'
 import { getTeamOverview } from '@/services/team.service'
-import type { SessionUser } from '@/types/domain'
 
 export const metadata: Metadata = { title: 'Team · JSK CRM' }
 
@@ -31,9 +29,10 @@ export const metadata: Metadata = { title: 'Team · JSK CRM' }
  * Everything here answers one of two questions: who is carrying too much, and
  * what is slipping.
  *
- * The list is bounded by `scoped_outlet_ids()` in the database, so a manager sees
- * their branches' salespeople and an owner sees everybody. Nothing on this page
- * widens that, and typing another branch's id into `?outlet=` narrows to nothing.
+ * The list is bounded by `scoped_owner_ids()` in the database, so a sales head
+ * sees their own direct reports and an owner sees everybody (ADR-040). Nothing on
+ * this page widens that, and typing another branch's id into `?outlet=` narrows
+ * to nothing.
  */
 export default async function TeamPage({
   searchParams,
@@ -41,8 +40,11 @@ export default async function TeamPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
   const user = await requireUser()
-  if (!isManagerOrAbove(user)) {
-    redirect(user.role === 'ADMIN' ? '/settings' : '/today')
+  if (!canViewTeamDashboard(user)) {
+    return <ForbiddenState
+      backHref="/today" title="This screen is not part of your role"
+      description="Ask the owner or an administrator if you need it."
+    />
   }
 
   const params = await searchParams
@@ -67,7 +69,7 @@ export default async function TeamPage({
       </header>
 
       <Suspense fallback={<SkeletonRows rows={1} />}>
-        <Filters user={user} />
+        <Filters />
       </Suspense>
 
       <Suspense key={JSON.stringify(flat)} fallback={<SkeletonRows rows={6} />}>
@@ -77,11 +79,8 @@ export default async function TeamPage({
   )
 }
 
-async function Filters({ user }: { user: SessionUser }) {
-  const outlets = await listOutlets()
-  const mine = isOwner(user)
-    ? outlets
-    : outlets.filter((outlet) => user.outletIds.includes(outlet.id))
+async function Filters() {
+  const mine = await listAuthorizedOutlets()
 
   return (
     <ScopeBar

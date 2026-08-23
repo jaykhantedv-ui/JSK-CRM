@@ -12,7 +12,7 @@ import { isOwner } from '@/lib/permissions'
 import { targetMonthFor, type Period } from '@/lib/period'
 import { getTeamWorkload } from '@/services/analytics.service'
 import { requireUser } from '@/services/auth.service'
-import { listOutlets } from '@/services/outlet.service'
+import { listAuthorizedOutlets } from '@/services/outlet.service'
 import { listTargetsForMonth, sumTargets, type SalesTarget } from '@/services/target.service'
 
 export const metadata: Metadata = { title: 'Sales targets · JSK CRM' }
@@ -54,15 +54,15 @@ async function Body({ period }: { period: Period }) {
   const month = targetMonthFor(period)
   const user = await requireUser()
 
-  const [targets, outlets, team] = await Promise.all([
+  const [targets, mine, team] = await Promise.all([
     listTargetsForMonth(month),
-    listOutlets(),
+    listAuthorizedOutlets(),
     getTeamWorkload(period),
   ])
 
-  const mine = isOwner(user)
-    ? outlets
-    : outlets.filter((outlet) => user.outletIds.includes(outlet.id))
+  // `listAuthorizedOutlets()` already answers "which branches may this person
+  // work in" (ADR-040). Filtering again here is how four screens ended up with
+  // four slightly different answers.
 
   const find = (outletId: string | null, userId: string | null): SalesTarget | undefined =>
     targets.find(

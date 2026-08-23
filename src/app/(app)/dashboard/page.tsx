@@ -1,10 +1,9 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
-import { redirect } from 'next/navigation'
 import { Suspense } from 'react'
 
 import { MoneyText } from '@/components/shared/money-text'
-import { SkeletonTiles } from '@/components/shared/states'
+import { ForbiddenState, SkeletonTiles } from '@/components/shared/states'
 import { buttonClass } from '@/components/ui/button'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { AtRiskList, PreviewFooter } from '@/features/management/at-risk-list'
@@ -15,7 +14,7 @@ import { ScopeBar } from '@/features/management/scope-bar'
 import { formatDate } from '@/lib/dates'
 import { LOST_REASON_LABELS, STAGE_LABELS } from '@/lib/labels'
 import { formatCount, formatDays, formatPercent } from '@/lib/metrics'
-import { isManagerOrAbove, isOwner } from '@/lib/permissions'
+import { canViewTeamDashboard, isOwner } from '@/lib/permissions'
 import { parsePeriod, type Period } from '@/lib/period'
 import { toRoute } from '@/lib/routes'
 import { requireUser } from '@/services/auth.service'
@@ -29,8 +28,8 @@ import {
   type ManagerDashboard,
   type OwnerDashboard,
 } from '@/services/dashboard.service'
-import { listOutlets } from '@/services/outlet.service'
-import type { OpportunityStage, SessionUser } from '@/types/domain'
+import { listAuthorizedOutlets } from '@/services/outlet.service'
+import type { OpportunityStage } from '@/types/domain'
 
 export const metadata: Metadata = { title: 'Dashboard · JSK CRM' }
 
@@ -42,14 +41,14 @@ export const metadata: Metadata = { title: 'Dashboard · JSK CRM' }
  * done. There are no dead-end charts here: the one visual, the owner's trend
  * line, sits beside the figures it draws.
  *
- * Scope is not a decision this page makes. A MANAGER's numbers cover the branches
- * they manage and an OWNER's cover the company, because `scoped_outlet_ids()` and
- * the RLS policies say so (§15, ADR-016). The branch dropdown narrows within that;
- * it cannot widen it.
+ * Scope is not a decision this page makes. A SALES HEAD's numbers cover their own
+ * team and an OWNER's cover the company, because `scoped_owner_ids()` and the RLS
+ * policies say so (§15, ADR-040). The branch dropdown narrows within that; it
+ * cannot widen it.
  *
- * ADMIN is redirected rather than shown empty tiles. ADR-017 — system
- * administration carries no business-data visibility — and empty tiles would
- * suggest the data was merely missing.
+ * ADMIN reads the same figures as the OWNER since ADR-040: it is the escalation
+ * point above the sales heads. It was previously redirected to `/settings`, on
+ * the grounds that it had no business-data visibility at all.
  */
 export default async function DashboardPage({
   searchParams,
@@ -57,9 +56,10 @@ export default async function DashboardPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
   const user = await requireUser()
-  if (!isManagerOrAbove(user)) {
-    redirect(user.role === 'ADMIN' ? '/settings' : '/today')
-  }
+  if (!canViewTeamDashboard(user)) return <ForbiddenState
+      backHref="/today" title="This screen is not part of your role"
+      description="Ask the owner or an administrator if you need it."
+    />
 
   const params = await searchParams
   const flat = Object.fromEntries(
@@ -97,7 +97,7 @@ export default async function DashboardPage({
       </header>
 
       <Suspense fallback={<SkeletonTiles tiles={4} />}>
-        <Filters user={user} />
+        <Filters />
       </Suspense>
 
       <Suspense key={JSON.stringify(flat)} fallback={<SkeletonTiles tiles={8} />}>
@@ -118,11 +118,8 @@ export default async function DashboardPage({
  * branch. Listing branches a manager cannot see would offer a filter that
  * returns nothing and read as a bug.
  */
-async function Filters({ user }: { user: SessionUser }) {
-  const outlets = await listOutlets()
-  const mine = isOwner(user)
-    ? outlets
-    : outlets.filter((outlet) => user.outletIds.includes(outlet.id))
+async function Filters() {
+  const mine = await listAuthorizedOutlets()
 
   return (
     <ScopeBar

@@ -17,6 +17,20 @@ restricted role** — never as OWNER, which passes everything (§23).
 
 Four values on `users.role`: `SALESPERSON`, `MANAGER`, `OWNER`, `ADMIN`.
 
+- **The reporting line is the read boundary (ADR-040).** `users.manager_id` says who reports to
+  whom, and a **Sales Head** (database role `MANAGER`) reads their own records and their **direct
+  reports'** — not their branch. Three sales heads share one branch in the pilot, and outlet scope
+  gave each of them the other two's pipeline. Branch scope still decides which branches a person
+  may file against, compare in reporting, and move a record between.
+- **A record follows its OWNER's sales head, not its branch.** A deal filed at another branch by
+  your salesperson stays yours; a deal filed at your branch by somebody else's does not become
+  yours.
+- **"Sales Head" is what the UI says; `MANAGER` is what the database stores.** The word "Manager"
+  must not appear in the interface for this role — the same discipline §2.4 applies to "Revenue".
+  `ROLE_LABELS` in `lib/permissions.ts` is the only place the label lives.
+- **The reporting line is legal or it is refused**, by `guard_user_hierarchy()`:
+  SALESPERSON → MANAGER → ADMIN → OWNER, no self-manager, no cycle, and nobody may change who
+  they report to but the OWNER or an ADMIN.
 - **No self-registration.** Users are created by OWNER or ADMIN (§3.2), through a Server Action
   that uses the service-role client **only after a server-side OWNER/ADMIN check** (ADR-009).
 - **The FIRST owner is the one exception, and it is not an in-application path.** With no OWNER
@@ -345,6 +359,24 @@ personal data**.
 **M-03 resolved.** Unauthorised record access returns **404 / not-found**, never a screen that
 confirms the record exists. §12.6's "Forbidden" state is reserved for route-level denial where no
 record identity is revealed.
+
+**Three controls, and only one of them is authorization (ADR-040).**
+
+| | What it decides | Where | Removing it |
+|---|---|---|---|
+| Row-level security | what a query returns | migration 031 | breaks everything |
+| Route authorization | whether a screen renders at all | `requireRole` / layout guards | costs a clear refusal, leaks nothing |
+| Navigation | what is worth offering | `components/layout/nav-items.ts` | costs tidiness, leaks nothing |
+
+A salesperson typing `/reports`, `/dashboard`, `/team` or `/settings` is answered with a refusal —
+not a redirect, which reads as a broken link — and would read nothing from the database even if
+both of the weaker controls were deleted.
+
+| Role | Navigation |
+|---|---|
+| SALESPERSON | Today · Customers · Contacts · Pipeline · Projects · My Day · My Targets |
+| SALES HEAD | Today · Customers · Contacts · Pipeline · Projects · Team · Reports |
+| ADMIN · OWNER | everything |
 
 **Service-role key (§15.7, ADR-009).** Three permitted callers: **cron routes**, **the import
 executor**, and **the user-provisioning Server Action** — the last only after a server-side

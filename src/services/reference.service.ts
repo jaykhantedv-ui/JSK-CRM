@@ -1,4 +1,4 @@
-import { listOutlets } from '@/services/outlet.service'
+import { listAuthorizedOutlets } from '@/services/outlet.service'
 import { getSetting } from '@/services/settings.service'
 import { listUsers } from '@/services/user.service'
 
@@ -14,9 +14,17 @@ import { listUsers } from '@/services/user.service'
 
 export type Option = { value: string; label: string }
 
-/** Active outlets, as select options. Every authenticated user may read the list. */
+/**
+ * Branches the caller may file a record against, as select options.
+ *
+ * **`listAuthorizedOutlets()`, not `listOutlets()`.** This feeds every creation
+ * and edit form, and it used to offer every active branch to everybody — so a
+ * salesperson posted to one branch was offered all of them and could pick one
+ * the database would then refuse. One helper decides who may work where
+ * (ADR-040); nothing here restates it.
+ */
 export async function outletOptions(): Promise<Option[]> {
-  const outlets = await listOutlets()
+  const outlets = await listAuthorizedOutlets()
   return outlets.map((outlet) => ({ value: outlet.id, label: `${outlet.name} (${outlet.code})` }))
 }
 
@@ -31,9 +39,11 @@ export async function cityOptions(): Promise<string[]> {
 /**
  * People an opportunity can be reassigned to.
  *
- * `listUsers()` reads through `users_select`, which shows a manager only the
- * people they share an outlet with. The list a manager sees is therefore already
- * their own team, without this function filtering anything.
+ * `listUsers()` reads through `users_select`, which since ADR-040 shows a sales
+ * head their own direct reports rather than everyone sharing a branch. The list
+ * is therefore already their team, without this function filtering anything —
+ * and a sales head cannot hand work to another team, because `opportunities`'
+ * WITH CHECK refuses an owner outside their scope.
  */
 export async function assignableUserOptions(): Promise<Option[]> {
   const users = await listUsers()

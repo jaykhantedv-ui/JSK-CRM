@@ -29,7 +29,11 @@ export const metadata: Metadata = { title: 'Import · JSK CRM' }
  */
 export default async function ImportPage() {
   const user = await requireUser()
-  if (!canImportCsv(user)) return <ForbiddenState />
+  if (!canImportCsv(user)) return (
+      <ForbiddenState title="This screen is not part of your role"
+      description="Ask the owner or an administrator if you need it."
+      />
+    )
 
   const batches = await listImportBatches()
 

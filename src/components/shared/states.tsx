@@ -83,14 +83,32 @@ export function ErrorState({ message, retryHref }: { message?: string; retryHref
  * §12.6 — "You don't have access to this record." **Never confirm existence.**
  * The same words whether the record is somebody else's or was never there.
  */
-export function ForbiddenState({ backHref = '/today' }: { backHref?: string }) {
+/**
+ * A refusal, in words (§12.6).
+ *
+ * Two shapes, one component: a RECORD the caller cannot reach — the default —
+ * and a SCREEN that is not part of their role, which the route guards pass their
+ * own wording for (ADR-040). A refusal is never a redirect: sending somebody to
+ * `/today` is indistinguishable from a mis-click and leaves them wondering
+ * whether the link was broken.
+ *
+ * "Sales head", not "manager". The database role is MANAGER and the interface
+ * never says so (ADR-040).
+ */
+export function ForbiddenState({
+  backHref = '/today',
+  title = "You don't have access to this record",
+  description = 'It may belong to another team, or it may not exist. Ask your sales head if you need it.',
+}: {
+  backHref?: string
+  title?: string
+  description?: string
+}) {
   return (
     <div className="flex flex-col items-center gap-3 rounded-lg border border-border px-6 py-12 text-center">
       <Lock className="size-6 text-muted-foreground" aria-hidden />
-      <p className="text-sm font-medium">You don&apos;t have access to this record</p>
-      <p className="max-w-sm text-sm text-muted-foreground">
-        It may belong to another branch, or it may not exist. Ask your manager if you need it.
-      </p>
+      <p className="text-sm font-medium">{title}</p>
+      <p className="max-w-sm text-sm text-muted-foreground">{description}</p>
       <Link href={toRoute(backHref)} className={buttonClass('outline', 'sm', 'mt-1')}>
         Go back
       </Link>

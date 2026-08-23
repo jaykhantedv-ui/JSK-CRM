@@ -20,14 +20,57 @@ export type CurrentUser = {
   isActive: boolean
   /** Outlet ids in the user's scope. Empty for OWNER (company-wide by role) and ADMIN. */
   outletIds: string[]
+  /** Who they report to (ADR-040). Null for the OWNER and for anyone not yet placed. */
+  managerId?: string | null
+}
+
+/**
+ * What the UI calls each role (ADR-040).
+ *
+ * **The database role is MANAGER; the business calls that person a Sales Head,
+ * and so does every screen.** The word "Manager" must not appear in the
+ * interface for this role — the same discipline §2.4 applies to "Revenue".
+ * Renaming the enum would have meant rewriting every policy, every helper and
+ * every migration for a word, so the value stayed and the label moved.
+ */
+export const ROLE_LABELS: Record<Role, string> = {
+  SALESPERSON: 'Salesperson',
+  MANAGER: 'Sales Head',
+  OWNER: 'Owner',
+  ADMIN: 'Administrator',
+}
+
+export function roleLabel(role: Role): string {
+  return ROLE_LABELS[role]
+}
+
+/**
+ * Who a person of this role may report to (ADR-040), as one list.
+ *
+ * The database enforces this in `guard_user_hierarchy()`; this is the same rule
+ * for the form, so the UI cannot offer a choice the database will refuse. If the
+ * two ever disagree the database wins and the form is wrong.
+ */
+export const MANAGER_ROLE_FOR: Record<Role, Role | null> = {
+  SALESPERSON: 'MANAGER',
+  MANAGER: 'ADMIN',
+  ADMIN: 'OWNER',
+  OWNER: null,
+}
+
+export function canReportTo(role: Role, managerRole: Role | null): boolean {
+  const required = MANAGER_ROLE_FOR[role]
+  if (required === null) return managerRole === null
+  return managerRole === required
 }
 
 /**
  * The business-data management tier: MANAGER and OWNER.
  *
- * ADMIN is deliberately absent (ADR-017). It administers users, outlets, settings
- * and imports; it carries no automatic right to read the pipeline. Read "or
- * above" as *above SALESPERSON in the sales hierarchy* — which ADMIN is not on.
+ * ADMIN is deliberately absent, and stayed absent through ADR-040. It now READS
+ * every operational record, but archiving, reassigning and exporting are acts of
+ * sales management rather than administration. Read "or above" as *above
+ * SALESPERSON in the sales hierarchy* — which ADMIN is not on.
  */
 export function isManagerOrAbove(user: Pick<CurrentUser, 'role'> | null): boolean {
   return user?.role === 'MANAGER' || user?.role === 'OWNER'
@@ -45,23 +88,42 @@ export function isOwner(user: Pick<CurrentUser, 'role'> | null): boolean {
 /**
  * Outlet scope (ADR-016). OWNER is company-wide by role and is never enumerated
  * as a member of every outlet — that would silently narrow their access the day
- * an outlet is added. A MANAGER with an empty scope manages nothing.
+ * an outlet is added. ADMIN joined OWNER here in ADR-040: it administers the
+ * branches, so it must be able to file against and compare all of them.
+ *
+ * **This is which branches you may WORK IN — it is not a read grant.** Since
+ * ADR-040 what a sales head may READ is their team; see `canReadRecord`.
  */
 export function managesOutlet(user: CurrentUser | null, outletId: string | null): boolean {
   if (!user) return false
-  if (user.role === 'OWNER') return true
+  if (user.role === 'OWNER' || user.role === 'ADMIN') return true
   if (user.role !== 'MANAGER' || !outletId) return false
   return user.outletIds.includes(outletId)
 }
 
-/** Ownership, plus outlet scope. The read rule for accounts, projects and opportunities. */
+/** OWNER and ADMIN read every operational record (ADR-040, superseding ADR-017). */
+export function readsAllRecords(user: Pick<CurrentUser, 'role'> | null): boolean {
+  return user?.role === 'OWNER' || user?.role === 'ADMIN'
+}
+
+/**
+ * Ownership, plus the reporting line. The read rule for accounts, projects and
+ * opportunities, mirroring the policies in migration 031.
+ *
+ * A sales head reads their own records and their direct reports'. Not their
+ * branch: three sales heads share one branch in the pilot, and outlet scope gave
+ * each of them the other two's pipeline.
+ */
 export function canReadRecord(
   user: CurrentUser | null,
   record: { owner_id: string | null; outlet_id: string | null },
+  directReportIds: readonly string[] = [],
 ): boolean {
   if (!user?.isActive) return false
   if (record.owner_id && record.owner_id === user.id) return true
-  return managesOutlet(user, record.outlet_id)
+  if (readsAllRecords(user)) return true
+  if (user.role !== 'MANAGER' || !record.owner_id) return false
+  return directReportIds.includes(record.owner_id)
 }
 
 export function canReassign(user: CurrentUser | null): boolean {
@@ -88,23 +150,33 @@ export function canEditSettings(user: CurrentUser | null): boolean {
   return isOwnerOrAdmin(user)
 }
 
-/** Team dashboard, reports and workload are a sales-management surface (§3.1). */
+/**
+ * Team dashboard, reports and workload (§3.1, ADR-040).
+ *
+ * MANAGER and OWNER by the sales hierarchy, and ADMIN because it now reads every
+ * operational record — refusing it a report it could assemble row by row
+ * protected nothing. Mirrors `assert_management_access()` in the database, which
+ * is the control; this only decides what the navigation offers.
+ */
 export function canViewTeamDashboard(user: CurrentUser | null): boolean {
-  return isManagerOrAbove(user)
+  return isManagerOrAbove(user) || readsAllRecords(user)
 }
 
-/**
- * Where a role lands after signing in (§12.2, decision M-01).
- * ADMIN goes to settings: it has no sales surface.
- */
-export function landingRouteFor(role: Role): '/today' | '/dashboard' | '/settings' {
+/** The organisation screens: branches, people and the reporting structure. */
+export function canManageOrganization(user: CurrentUser | null): boolean {
+  return isOwnerOrAdmin(user)
+}
+
+/** Where a role lands after signing in (§12.2, decision M-01, ADR-040). */
+export function landingRouteFor(role: Role): '/today' | '/dashboard' {
   switch (role) {
     case 'SALESPERSON':
       return '/today'
     case 'MANAGER':
     case 'OWNER':
-      return '/dashboard'
+    // ADR-040 gave ADMIN the operational picture, so it lands on it rather than
+    // on a configuration form.
     case 'ADMIN':
-      return '/settings'
+      return '/dashboard'
   }
 }

@@ -75,4 +75,10 @@ export type SessionUser = {
   role: UserRole
   isActive: boolean
   outletIds: string[]
+  /**
+   * Who this person reports to (ADR-040), or null for the OWNER and for anyone
+   * not yet placed in the line. It is the read boundary for a MANAGER, so it is
+   * carried on the session rather than fetched per screen.
+   */
+  managerId: string | null
 }

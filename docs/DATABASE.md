@@ -187,6 +187,7 @@ everywhere else, and §17.6's future-proofing list is closed.
 | `sla_notified_at timestamptz` | `opportunities` | **ADR-002** (B-05) | The §14.2 SLA reminder must fire once per opportunity, and the "event metadata" key it names cannot exist: §4.2 rejects a notifications table, the event enum has no notification value, and event rows cannot be updated. Without state the reminder re-sends **every hour, forever**. Null = not yet notified. **Not user-writable through any policy.** |
 | `outlet_id uuid not null` | `accounts`, `projects`, `opportunities` | **ADR-016** | Replaces `branch text`. `not null` on purpose: a record belonging to no outlet would be invisible to every manager, which is the accountability gap the CRM exists to close. |
 | *(removed)* `branch text` | `users`, `accounts`, `projects`, `opportunities` | **ADR-016** | Free text cannot carry identity, assignment or deactivation. |
+| `manager_id uuid` | `users` | **ADR-040** | Who this person reports to. Nullable — the OWNER reports to nobody, and a person may exist before they are placed. It is **the read boundary for a Sales Head**: outlet scope could not express three sales heads in one branch, which is the pilot organisation. Enforced by `guard_user_hierarchy()` and the `manager_not_self` CHECK; no new table, because the line between two `users` rows IS the organisation (CLAUDE.md §4). |
 
 One **constraint** is added beyond §5 — `account_reachable` (ADR-013) — and two **settings keys**,
 the ADR-014 maintenance counters.
@@ -392,6 +393,30 @@ the migration: `lib/duplicates.ts` holds them once and passes them in, so the nu
 apart. The transition matrix is likewise **not** restated in SQL — it lives in
 `lib/opportunity/transitions.ts` and is validated there (CLAUDE.md §13); the check constraints
 remain the backstop.
+
+**Production hardening adds one more:**
+
+```
+031_org_hierarchy               users.manager_id + manager_not_self + guard_user_hierarchy()
+                                (role pairing, no self-manager, no cycle, no self-service change)
+                                scoped_owner_ids(), reads_all_records(), my_manager_id()
+                                manages_user() and can_read_* rewritten to the reporting line
+                                every scoped SELECT/INSERT/UPDATE policy moved from
+                                `outlet_id in scoped_outlet_ids()` to
+                                `owner_id in scoped_owner_ids()` — same per-query set form as 028
+                                assert_management_access() admits ADMIN; scoped_outlet_ids() too
+                                management_team_workload() lists direct reports, not branch-mates
+                                                                                       [ADR-040]
+```
+
+`my_manager_id()` is `SECURITY DEFINER` for one reason: the policy that uses it is **on
+`public.users`**, and a policy on that table which selects from that table recurses — the trap
+§15.1 and CLAUDE.md §6 both name, and which this migration hit before the helper existed.
+
+031 grants **function by function**, never `grant execute on all functions in schema public`. 015,
+018 and 027 deliberately leave the SECURITY DEFINER trigger bodies and the maintenance RPC
+ungranted, and a blanket grant silently re-exposes every one of them —
+`tests/integration/service-contracts.test.ts` asserts exactly that and caught it here.
 
 `accounts` and `contacts` are mutually referential; **006 → 007 → 008 breaks the cycle. Do not
 attempt a single migration for both** (§5.12, §25).

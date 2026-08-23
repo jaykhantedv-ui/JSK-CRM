@@ -32,7 +32,7 @@ import {
 } from '@/services/analytics.service'
 import { getSetting } from '@/services/settings.service'
 import { getTargetProgress } from '@/services/target.service'
-import type { OpportunityFlagsRow, OpportunityStage, SessionUser } from '@/types/domain'
+import type { ActivityType, OpportunityFlagsRow, OpportunityStage, SessionUser } from '@/types/domain'
 
 /**
  * Dashboard metrics (§13.1).
@@ -175,6 +175,56 @@ async function resolveAccountNames(ids: string[]): Promise<Record<string, string
   if (error) throw fromPostgrestError(error)
 
   return Object.fromEntries((data ?? []).map((row) => [row.id, row.name]))
+}
+
+/** What one person actually did today, beside what they still have to do. */
+export type MyDay = {
+  dueToday: WorkQueueRow[]
+  overdue: WorkQueueRow[]
+  loggedToday: { id: string; type: ActivityType; occurred_at: string; account_id: string }[]
+  accountNames: Record<string, string>
+}
+
+/**
+ * `/my-day` — the day, closed off (ADR-040).
+ *
+ * `/today` answers *what is waiting on me*, over every horizon it knows: overdue,
+ * due today, upcoming, missing a next action, breaching SLA. This answers a
+ * narrower question the same person asks at six o'clock — *what did I say I would
+ * do today, and what did I actually do?* — so the two lists sit side by side and
+ * the gap between them is the point.
+ *
+ * Nothing here is a new metric. The queue is the same view `/today` reads, and
+ * the right-hand list is the caller's own activity rows for the business day.
+ * Scoped by `owner_id` / `performed_by` so it means "mine" for a sales head too,
+ * who can legitimately see their whole team.
+ */
+export async function getMyDay(): Promise<MyDay> {
+  const user: SessionUser = await requireUser()
+  const supabase = await createSupabaseServerClient()
+  const today = businessToday()
+
+  const queue = await getSalespersonDashboard(user.id)
+
+  // The business day is Asia/Kolkata, never the session's timezone (§8.11):
+  // between 00:00 and 05:30 IST a UTC comparison reports yesterday.
+  const { data, error } = await supabase
+    .from('activities')
+    .select('id, type, occurred_at, account_id')
+    .eq('performed_by', user.id)
+    .gte('occurred_at', `${today}T00:00:00+05:30`)
+    .lt('occurred_at', `${addDays(today, 1)}T00:00:00+05:30`)
+    .order('occurred_at', { ascending: false })
+    .limit(QUEUE_LIMIT)
+
+  if (error) throw fromPostgrestError(error)
+
+  return {
+    dueToday: queue.dueToday,
+    overdue: queue.overdue,
+    loggedToday: data ?? [],
+    accountNames: queue.accountNames,
+  }
 }
 
 export type StageSummary = {

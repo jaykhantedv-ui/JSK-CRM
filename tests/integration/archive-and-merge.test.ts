@@ -144,11 +144,12 @@ describe('archive_account — C-3’s one controlled operation', () => {
   it('refuses when a child sits outside the caller’s scope, rather than half-archiving', async () => {
     await as(null, async () => {
       // Arranged as the owner of the database, so RLS does not interfere with
-      // setting up the awkward case: a customer in outlet A holding an
-      // opportunity in outlet B.
+      // setting up the awkward case: a customer whose opportunity belongs to
+      // ANOTHER sales head's salesperson. Since ADR-040 that is what "outside
+      // your scope" means — before it, it was a record filed at another branch.
       await db.query('reset role')
-      await db.query('update public.opportunities set outlet_id = $1 where id = $2', [
-        '00000000-0000-4000-8000-000000002002',
+      await db.query('update public.opportunities set owner_id = $1 where id = $2', [
+        USERS.salesB1,
         OPPORTUNITIES.aOwnedByA1,
       ])
 

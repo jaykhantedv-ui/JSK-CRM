@@ -61,8 +61,9 @@ describe('028 — outlet scope: the set form decides exactly what manages_outlet
     ['MANAGER with no outlets, outlet A', USERS.managerNone, OUTLETS.a],
     ['SALESPERSON, own outlet A', USERS.salesA1, OUTLETS.a],
     ['SALESPERSON, outlet B', USERS.salesA1, OUTLETS.b],
-    ['ADMIN, outlet A', USERS.admin, OUTLETS.a],
     ['DEACTIVATED user, outlet A', USERS.deactivated, OUTLETS.a],
+    // ADMIN is deliberately absent: ADR-040 made the two forms disagree for it,
+    // and the case below states that divergence rather than hiding it.
   ]
 
   for (const [label, user, outlet] of cases) {
@@ -70,6 +71,21 @@ describe('028 — outlet scope: the set form decides exactly what manages_outlet
       expect(await newWay(user, outlet)).toBe(await oldWay(user, outlet))
     })
   }
+
+  // ADR-040 pulled these two apart for ADMIN, on purpose, and this is the only
+  // role for which they now differ:
+  //
+  //   scoped_outlet_ids()  every active outlet — ADMIN administers the branches
+  //                        and compares their numbers in reporting
+  //   manages_outlet()     false — it guards MOVING a record between branches,
+  //                        and ADMIN writes no business data at all
+  //
+  // Stating it here means a future reader who finds the forms disagreeing has
+  // the reason in front of them instead of a puzzle.
+  it('diverges for ADMIN, deliberately: it may compare every branch and move nothing', async () => {
+    expect(await newWay(USERS.admin, OUTLETS.a)).toBe(true)
+    expect(await oldWay(USERS.admin, OUTLETS.a)).toBe(false)
+  })
 
   // An anonymous caller never reaches either form: every scoped policy is `to
   // authenticated`, so `anon` matches no policy and the expression is never
@@ -189,12 +205,20 @@ describe('029 — work context and readability sets match the functions they rep
     expect(counts).toEqual({ opportunities: 0, accounts: 0 })
   })
 
-  it('ADMIN still gets no business data through them (ADR-017)', async () => {
-    const counts = await asUser(db, USERS.admin, async (c) => {
-      const o = await c.query('select count(*)::int n from (select public.readable_opportunity_ids()) s')
-      const a = await c.query('select count(*)::int n from (select public.readable_account_ids()) s')
-      return { opportunities: o.rows[0].n, accounts: a.rows[0].n }
+  it('ADMIN reaches the same rows through them as through the policies (ADR-040)', async () => {
+    // The helpers are SECURITY INVOKER on purpose — they select from the table
+    // and let its own policy filter. So widening ADMIN's read in 031 must show
+    // up here identically, and a helper that had been written as a second copy
+    // of the rule would now be out of step.
+    const { viaHelper, viaPolicy } = await asUser(db, USERS.admin, async (c) => {
+      const a = await c.query('select public.readable_opportunity_ids() as id')
+      const b = await c.query('select id from public.opportunities')
+      return {
+        viaHelper: a.rows.map((r: { id: string }) => r.id).sort(),
+        viaPolicy: b.rows.map((r: { id: string }) => r.id).sort(),
+      }
     })
-    expect(counts).toEqual({ opportunities: 0, accounts: 0 })
+    expect(viaHelper.length).toBeGreaterThan(0)
+    expect(viaHelper).toEqual(viaPolicy)
   })
 })

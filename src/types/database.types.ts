@@ -1134,6 +1134,7 @@ export type Database = {
           full_name: string
           id: string
           is_active: boolean
+          manager_id: string | null
           phone: string | null
           role: Database["public"]["Enums"]["user_role"]
           updated_at: string
@@ -1144,6 +1145,7 @@ export type Database = {
           full_name: string
           id: string
           is_active?: boolean
+          manager_id?: string | null
           phone?: string | null
           role?: Database["public"]["Enums"]["user_role"]
           updated_at?: string
@@ -1154,11 +1156,20 @@ export type Database = {
           full_name?: string
           id?: string
           is_active?: boolean
+          manager_id?: string | null
           phone?: string | null
           role?: Database["public"]["Enums"]["user_role"]
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "users_manager_id_fkey"
+            columns: ["manager_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {
@@ -1822,6 +1833,7 @@ export type Database = {
           projects: number
         }[]
       }
+      my_manager_id: { Args: never; Returns: string }
       my_opportunity_account_ids: { Args: never; Returns: string[] }
       my_opportunity_project_ids: { Args: never; Returns: string[] }
       normalize_phone: { Args: { raw: string }; Returns: string }
@@ -1830,6 +1842,7 @@ export type Database = {
       raise_not_found: { Args: never; Returns: undefined }
       readable_account_ids: { Args: never; Returns: string[] }
       readable_opportunity_ids: { Args: never; Returns: string[] }
+      reads_all_records: { Args: never; Returns: boolean }
       reassign_opportunity: {
         Args: { p_opportunity_id: string; p_reason: string; p_to_user: string }
         Returns: {
@@ -1909,6 +1922,7 @@ export type Database = {
       }
       safe_uuid: { Args: { p_text: string }; Returns: string }
       scoped_outlet_ids: { Args: never; Returns: string[] }
+      scoped_owner_ids: { Args: never; Returns: string[] }
       search_crm: {
         Args: { p_limit?: number; p_query: string }
         Returns: {

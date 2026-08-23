@@ -881,16 +881,45 @@ carrying the real migrations — empty database succeeds, second attempt refused
 Auth user and profile consistent, role OWNER and active, password verifiable,
 no secret in the output. See ADR-039.
 
-## 10.7 Create the real users and outlets
+## 10.7 Create the real branches and people
 
-Sign in as the first OWNER, then:
+Sign in as the first OWNER (§10.6), then work through **Settings → Organization**
+in this order. It is an order, not a preference: a person cannot be added before
+the person they report to exists, because `guard_user_hierarchy()` checks the
+manager's role (ADR-040).
 
-1. **Settings → Outlets** — rename the two outlets to the real showroom names.
-2. **Settings → Users** — create the 20 real users: 1 owner, 1 admin, 2 managers,
-   16 salespeople.
-3. **Give every manager at least one outlet.** A manager with no outlet scope sees
-   no data at all and it looks like a broken login rather than a setting.
-4. **Settings** — check the cities, material types and thresholds.
+1. **Branches** — add each showroom. Branch names are data; nothing is seeded. A
+   branch that is not being worked yet is created and then **Closed**, which
+   keeps it out of every selector while leaving it available to reopen.
+2. **People — the administrator first.** They report to the owner.
+3. **People — the sales heads.** Each reports to an administrator. The interface
+   calls them **Sales Head**; the database role is `MANAGER`, and no screen says
+   so.
+4. **People — the salespeople.** Each reports to a sales head, chosen from a list
+   that only ever contains sales heads.
+5. **Give everybody at least one branch.** A person with no branch is offered no
+   branch to file a record against, which looks like a broken form.
+6. **Reporting Structure** — read the tree back. **This is the authorization
+   model, drawn**: a sales head sees exactly the branch below them, so a person in
+   the wrong place is a person seeing the wrong pipeline.
+7. **Settings** — check the taluks, material types and thresholds.
+
+Each person is created with a **temporary password** the administrator reads out.
+There is no self-registration and nothing is seeded (§3.2, ADR-009); ask them to
+change it after their first sign-in.
+
+### What each role sees
+
+| | Reads | Navigation |
+|---|---|---|
+| **Salesperson** | their own records | Today · Customers · Contacts · Pipeline · Projects · My Day · My Targets |
+| **Sales Head** | their own and their **direct reports'** — never another sales head's team | the above, minus My Day / My Targets, plus Team · Reports |
+| **Administrator** | every operational record; writes none | everything |
+| **Owner** | everything | everything |
+
+A sales head's scope is their **team**, not their branch. Three sales heads
+sharing one showroom are three separate teams, and a record follows its owner's
+sales head rather than the branch it was filed at (ADR-040).
 
 ## 10.8 Remote access (optional)
 

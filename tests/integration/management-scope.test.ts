@@ -48,7 +48,7 @@ const periodArgs = `${MONTH_FROM_SQL}, ${MONTH_TO_SQL}`
 
 // ============================================================ the gate ====
 
-describe('the management gate refuses everyone but MANAGER and OWNER', () => {
+describe('the management gate refuses SALESPERSON, and nobody else', () => {
   const CALLS: { name: string; sql: string }[] = [
     { name: 'management_pipeline_by_stage', sql: `select * from public.management_pipeline_by_stage($$${PROBABILITIES}$$::jsonb)` },
     { name: 'management_exceptions', sql: `select * from public.management_exceptions($$${STALL_DAYS}$$::jsonb, ${DORMANCY_DAYS}, ${HIGH_VALUE}, now())` },
@@ -72,17 +72,17 @@ describe('the management gate refuses everyone but MANAGER and OWNER', () => {
     await asUser(db, USERS.salesA1, async (tx) => {
       const error = await expectRejected(tx, sql)
       expect(error.code).toBe('42501')
-      expect(error.message).toMatch(/managers and the owner only/i)
+      expect(error.message).toMatch(/sales heads/i)
     })
   })
 
-  // ADR-017 — ADMIN administers users, settings and imports. System
-  // administration is not sales management, and reaching /settings does not
-  // confer a dashboard.
-  it.each(CALLS)('refuses an ADMIN calling $name', async ({ sql }) => {
+  // ADR-040 supersedes ADR-017 on this point. ADMIN is the escalation point
+  // above the sales heads and reads every operational record, so refusing it the
+  // report it could already assemble row by row protected nothing. It still
+  // writes no business data, archives nothing and reassigns nobody.
+  it.each(CALLS)('ALLOWS an ADMIN calling $name', async ({ sql }) => {
     await asUser(db, USERS.admin, async (tx) => {
-      const error = await expectRejected(tx, sql)
-      expect(error.code).toBe('42501')
+      await expect(tx.query(sql)).resolves.toBeDefined()
     })
   })
 
@@ -119,8 +119,8 @@ describe('the management gate refuses everyone but MANAGER and OWNER', () => {
 
 // ================================================== outlet scope ==========
 
-describe('a manager sees their own branch and no other', () => {
-  it('reports only branch A pipeline value to the branch A manager', async () => {
+describe('a sales head sees their own team and no other', () => {
+  it('reports their team’s pipeline value to the branch A sales head', async () => {
     const rows = await scenario(db, arrangeManagementData, USERS.managerA, async (tx) => {
       const result = await tx.query(
         `select stage, value_paise from public.management_pipeline_by_stage($$${PROBABILITIES}$$::jsonb)`,
@@ -130,15 +130,22 @@ describe('a manager sees their own branch and no other', () => {
 
     const total = rows.reduce((sum, row) => sum + Number(row.value_paise), 0)
 
-    // Branch B's stalled/open work must be absent. If it leaked, the total would
-    // include the ₹4,00,000 branch-B loss estimate or the branch-B win.
+    // Branch B's stalled/open work must be absent — it belongs to sales.b1, who
+    // reports to a different sales head. If it leaked the total would include the
+    // branch-B loss estimate or the branch-B win.
     expect(total).toBeGreaterThan(0)
     expect(total).toBe(
-      // Branch A's OPEN work only: the two dev-fixture opportunities at branch A,
-      // plus the stalled, overdue and unqualified-quotation rows this suite adds.
+      // Everything OPEN owned by sales.a1 and sales.a2, who report to manager.a:
+      // the three dev-fixture opportunities they own, plus the stalled, overdue
+      // and unqualified-quotation rows this suite adds.
       45_000_000 +
         120_000_000 +
         15_000_000 +
+        // Gobi residency sits at branch C and is owned by sales.a1. Under
+        // ADR-040 a record follows its OWNER's sales head, not its branch, so
+        // manager.a sees it and the branch-C manager does not. Removing this
+        // term is how a reader can check the rule really changed.
+        60_000_000 +
         VALUES.aStalledEstimatePaise +
         VALUES.aOverdueEstimatePaise +
         VALUES.aQuotedNoQualifyEstimatePaise,
@@ -196,8 +203,12 @@ describe('a manager sees their own branch and no other', () => {
     expect(Number(summary.won_value_paise)).toBe(0)
   })
 
-  it('gives a manager with two branches both of them, and nothing else', async () => {
-    // manager.ac holds A and C. Branch B must still be invisible.
+  it('holding a branch is not a licence to read the team working in it', async () => {
+    // manager.ac holds branches A and C — and manages nobody who works there.
+    // Their one direct report is sales.b1, at branch B. Under outlet scope this
+    // manager read every branch-A deal belonging to manager.a's team; that is
+    // the exact defect ADR-040 exists to close, and it is what three sales heads
+    // in one branch made unavoidable.
     const summary = await scenario(db, arrangeManagementData, USERS.managerAC, async (tx) => {
       const result = await tx.query(
         `select won_value_paise from public.management_period_summary(${periodArgs})`,
@@ -205,9 +216,8 @@ describe('a manager sees their own branch and no other', () => {
       return result.rows[0]
     })
 
-    expect(Number(summary.won_value_paise)).toBe(
-      VALUES.aWonQuotedPaise + VALUES.aWonNeverQuotedPaise,
-    )
+    // sales.b1's win, and not one rupee of branch A's.
+    expect(Number(summary.won_value_paise)).toBe(VALUES.bWonQuotedPaise)
   })
 
   it('gives a manager with no branch scope an empty report, not an error', async () => {
@@ -327,12 +337,17 @@ describe('team workload obeys scope (§8)', () => {
       db,
       async (tx) => {
         await arrangeManagementData(tx)
-        // A fresh salesperson at branch A with nothing assigned.
+        // A fresh salesperson reporting to manager.a with nothing assigned. The
+        // reporting line, not the branch, is what puts them on this list now.
         await tx.query(
           `insert into auth.users (id, email, aud, role, encrypted_password, email_confirmed_at, raw_user_meta_data)
            values ($1, 'idle@jsk.test', 'authenticated', 'authenticated', 'x', now(), '{"full_name":"Idle Person"}')`,
           ['00000000-0000-4000-8000-00000000900a'],
         )
+        await tx.query(`update public.users set manager_id = $2 where id = $1`, [
+          '00000000-0000-4000-8000-00000000900a',
+          USERS.managerA,
+        ])
         await tx.query(
           `insert into public.user_outlets (user_id, outlet_id) values ($1, $2)`,
           ['00000000-0000-4000-8000-00000000900a', OUTLETS.a],
@@ -484,7 +499,7 @@ describe('at-risk classification uses the supplied thresholds (§9)', () => {
     expect(Number(stalled.days_in_stage)).toBeGreaterThan(Number(stalled.stage_stall_days))
   })
 
-  it('never returns another branch’s at-risk work', async () => {
+  it('never returns another team’s at-risk work', async () => {
     const rows = await scenario(
       db,
       async (tx) => {
@@ -514,7 +529,11 @@ describe('at-risk classification uses the supplied thresholds (§9)', () => {
     )
 
     expect(rows.length).toBeGreaterThan(0)
-    expect(new Set(rows)).toEqual(new Set([OUTLETS.a]))
+    // Branch B belongs to another sales head's report and must be absent. Branch
+    // C may legitimately appear: Gobi residency is owned by sales.a1, who
+    // reports to this caller, and a record follows its owner (ADR-040).
+    expect(rows).not.toContain(OUTLETS.b)
+    expect(new Set(rows).has(OUTLETS.a)).toBe(true)
   })
 
   it('respects a threshold change without a code change', async () => {
@@ -613,24 +632,28 @@ describe('customer and project reporting obey scope (§15)', () => {
 // ================================================ sales targets ===========
 
 describe('sales targets are management data (ADR-021)', () => {
-  it('hides every target from a SALESPERSON, including their own', async () => {
+  it('shows a SALESPERSON their OWN target and no other', async () => {
     const rows = await scenario(db, arrangeTargets, USERS.salesA1, async (tx) => {
       const result = await tx.query('select id, target_paise from public.sales_targets')
       return result.rows
     })
 
-    // A target is a management planning figure. §4 keeps management data off the
-    // salesperson's surface, and a settings row would have published it to
-    // everyone — which is precisely why this is a table (ADR-021).
-    expect(rows).toHaveLength(0)
+    // ADR-040 opens exactly one target to a salesperson: the one set for them,
+    // which is what "My Targets" shows. The branch figure and the company figure
+    // stay management data — a settings row would have published all three to
+    // everybody, which is precisely why this is a table (ADR-021).
+    expect(rows).toHaveLength(1)
+    expect(Number(rows[0].target_paise)).toBe(TARGETS.salesA1Paise)
   })
 
-  it('hides every target from an ADMIN', async () => {
+  it('shows an ADMIN every target', async () => {
     const rows = await scenario(db, arrangeTargets, USERS.admin, async (tx) => {
       const result = await tx.query('select id from public.sales_targets')
       return result.rows
     })
-    expect(rows).toHaveLength(0)
+    // ADR-040: the administrator reads every operational record. It still writes
+    // none — setting a target remains the owner's and the sales head's.
+    expect(rows).toHaveLength(4)
   })
 
   it('shows a manager their branch target but never the company figure', async () => {
