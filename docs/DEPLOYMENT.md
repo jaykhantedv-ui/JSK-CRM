@@ -444,7 +444,8 @@ stack trace, or the word "Revenue".
 ## 9. Launch checklist (§23.9)
 
 - [ ] Migrations apply cleanly to an empty database
-- [ ] Seed produces a working OWNER login (and the ADR-003 system user, `is_active = false`)
+- [ ] Migrations create the ADR-003 system user (`is_active = false`); the seed creates NO user
+- [ ] `deploy/bootstrap-owner.sh` has been run once — §10.6 — and that OWNER can sign in
 - [ ] `system_settings.cities` populated with the **ten Erode District revenue taluks** — Erode,
       Perundurai, Modakkurichi, Kodumudi, Gobichettipalayam, Sathyamangalam, Bhavani, Anthiyur,
       Thalavadi, Nambiyur (**Chennimalai is not among them** — it is a block/firka under
@@ -776,7 +777,111 @@ The timers reproduce `vercel.json` exactly, in UTC:
 | backup | 21:00 | 02:30 |
 | restore verification | Sun 22:00 | Mon 03:30 |
 
-## 10.6 Create the real users and outlets
+## 10.6 Create the first OWNER (once, and only once)
+
+**This is the step that makes the deployment usable.** Everything before it leaves
+a CRM nobody can sign in to.
+
+There is no self-registration in any environment (§3.2), the production seed is
+deliberately empty, and users are created by an OWNER or an ADMIN at
+Settings → Users. On a brand-new deployment that is a deadlock: the first OWNER
+cannot be created from inside the application, because creating a user requires
+already being one.
+
+```bash
+cd /opt/jsk-crm            # wherever the repository is checked out
+deploy/bootstrap-owner.sh --status          # confirms it has not been done
+deploy/bootstrap-owner.sh \
+  --email owner@example.com \
+  --name 'Full Name' \
+  --confirm-production
+```
+
+It asks the deployment's own name back at you and waits for `BOOTSTRAP-OWNER` to
+be typed, then prints a generated password **once**:
+
+```
+  Creating the FIRST OWNER of https://www.example.com.
+  Email: owner@example.com
+  This account can see and change everything in the CRM.
+
+  Type BOOTSTRAP-OWNER to continue: BOOTSTRAP-OWNER
+--- checking the Supabase gateway on this host
+--- creating the Auth account (admin API, as the application does)
+--- Auth account created
+--- setting the role to OWNER
+
+OWNER CREATED — sign in at https://www.example.com as owner@example.com
+
+  Password: ⟨shown once⟩
+```
+
+**Sign in, change the password, and clear the terminal's scrollback.** The
+generated password exists nowhere else — it is not written to a file and not
+stored in the environment. To choose one instead of generating it:
+
+```bash
+deploy/bootstrap-owner.sh --email owner@example.com --name 'Full Name' \
+  --confirm-production --password-stdin
+```
+
+and type it when the script reads stdin. A password is **never** accepted as a
+command-line argument: it would be visible in `ps` to every user on the machine
+and would land in the shell history, so `--password` is refused by name.
+
+| Exit | Meaning |
+|---|---|
+| `0` | the owner was created (or, for `--status`, one already exists) |
+| `2` | a bad or missing argument — nothing was contacted |
+| `3` | **an active OWNER already exists**; nothing was changed |
+| `1` | the Auth service was unreachable, or the account could not be completed |
+
+### It runs once
+
+Re-running is safe and expected — an operator who is not sure whether it worked
+should run it again. It refuses with exit `3` and changes nothing:
+
+```
+This deployment already has an active OWNER: owner@example.com
+```
+
+Every user after the first is created by that owner at **Settings → Users**,
+which is the path that applies the role and the outlet scope properly. If the
+first owner cannot sign in, an ADMIN resets their password there — do not create a
+second owner here.
+
+### What it actually does
+
+The same three steps `services/user.service.ts` performs when an OWNER creates a
+user, in the same order:
+
+1. `POST /auth/v1/admin/users` — the Supabase Auth **admin API**, with
+   `email_confirm` (there is no SMTP requirement in V1, so an unconfirmed owner
+   could never sign in) and the name in `user_metadata`. GoTrue owns `auth.users`
+   and the password hashing in it; **no row of that table is ever written by
+   hand**.
+2. The `on_auth_user_created` trigger mirrors the account into `public.users` as
+   an active SALESPERSON, as it does for every user.
+3. The role is set to OWNER afterwards, server-side — never carried in the sign-up
+   metadata, which the trigger deliberately ignores so that creating a user can
+   never become a role-escalation path.
+
+It then reads the result back out of the database and requires an active OWNER
+whose id and address match the Auth account. If anything is short of that, the
+half-made account is deactivated so it cannot sign in, and the run fails.
+
+No secret is printed and none crosses a command line: the service-role key
+reaches curl in a configuration read from stdin, and the password in a `0600`
+file inside a private temporary directory that is deleted on exit. The one
+deliberate exception is the generated password above, which has to be shown or it
+could never be used.
+
+`scripts/test-bootstrap-owner.sh` proves all of it against a real PostgreSQL
+carrying the real migrations — empty database succeeds, second attempt refused,
+Auth user and profile consistent, role OWNER and active, password verifiable,
+no secret in the output. See ADR-039.
+
+## 10.7 Create the real users and outlets
 
 Sign in as the first OWNER, then:
 
@@ -787,7 +892,7 @@ Sign in as the first OWNER, then:
    no data at all and it looks like a broken login rather than a setting.
 4. **Settings** — check the cities, material types and thresholds.
 
-## 10.7 Remote access (optional)
+## 10.8 Remote access (optional)
 
 ```bash
 # after putting CLOUDFLARE_TUNNEL_TOKEN in deploy/env/production.env

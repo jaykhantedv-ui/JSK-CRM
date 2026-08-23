@@ -368,7 +368,13 @@ $EDITOR deploy/env/production.env               # set PUBLIC_URL / PUBLIC_SUPABA
 deploy/start.sh --build                         # LOCAL mode — no Cloudflare needed
 deploy/health.sh                                # expect HEALTHY
 scripts/smoke.sh http://localhost               # end-to-end check (the PUBLIC_URL)
+
+deploy/bootstrap-owner.sh \
+  --email owner@example.com --name 'Full Name' --confirm-production
 ```
+
+**Do not skip the last line.** A healthy stack with no OWNER is a CRM nobody can
+sign in to — see below.
 
 `deploy/start.sh --tunnel` adds remote access and is the **only** thing that needs a
 Cloudflare token; without `--tunnel` nothing about the stack requires Cloudflare, and
@@ -386,6 +392,49 @@ deploy/stop.sh             # stop the containers, keep the data
 deploy/health.sh           # app, database, restart-loops, disk, backup freshness
 deploy/migrate.sh --status # what is applied, what is pending
 ```
+
+### Nobody can sign in — there is no OWNER yet
+
+The symptom is a working login page that rejects every address, on a deployment
+where everything else reports healthy. Confirm it in one command:
+
+```bash
+deploy/bootstrap-owner.sh --status
+# no active OWNER — this deployment still needs the one-time bootstrap
+```
+
+It is not a fault. There is no self-registration in any environment (§3.2), the
+production seed creates no users on purpose, and users are created by an OWNER at
+Settings → Users — so the first owner cannot be made from inside the application.
+`deploy/bootstrap-owner.sh` is the only way out of that, and it runs **once**:
+
+```bash
+deploy/bootstrap-owner.sh \
+  --email owner@example.com --name 'Full Name' --confirm-production
+```
+
+It names the deployment and waits for `BOOTSTRAP-OWNER` to be typed, then prints a
+generated password once. **Sign in, change it, clear the scrollback** — that
+password is stored nowhere else. Use `--password-stdin` to type your own instead;
+`--password` on the command line is refused, because arguments are visible in `ps`
+and land in the shell history.
+
+Re-running it is safe. Once an active OWNER exists it stops with exit `3` and
+changes nothing:
+
+```
+This deployment already has an active OWNER: owner@example.com
+```
+
+| Situation | What to do |
+|---|---|
+| No owner yet | run it — this is what it is for |
+| The owner exists but forgot their password | an ADMIN resets it at Settings → Users. Do **not** run this again |
+| The only owner was deactivated by mistake | run it: a deactivated owner cannot sign in, so it does not block the bootstrap. Reactivate the original afterwards |
+| A second owner is wanted | Settings → Users, as the first owner. Never here |
+
+Full procedure and exit codes: `/docs/DEPLOYMENT.md` §10.6. Design and the reason
+this is a script rather than a first-run web page: ADR-039.
 
 ### Is it actually working?
 

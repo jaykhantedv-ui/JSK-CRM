@@ -2021,6 +2021,82 @@ format, the encryption and the schema are untouched.
 - **Skip validation when no `pg_restore` is available.** Rejected: an unverified
   backup is a guess, and a check that silently opts out is worse than none.
 
+### ADR-039 — The first OWNER is bootstrapped by a one-time operator command
+
+**Status:** Accepted
+**Date:** 2026-08-23   **Decided by:** Engineering
+
+**Context.** Production UAT reached a deployment that was healthy in every respect
+and impossible to sign into. Three deliberate decisions meet at a deadlock:
+
+- there is **no self-registration** in any environment (§3.2), and
+  `GOTRUE_DISABLE_SIGNUP` is `true`;
+- `supabase/seed/seed.sql` creates **no users** — outlets and users are business
+  data, and nothing that ships to production may invent either (CLAUDE.md §15);
+- users are created by an OWNER or an ADMIN through the provisioning Server
+  Action, whose first statement is an OWNER/ADMIN check (ADR-009).
+
+So the first OWNER cannot be created from inside the application, because creating
+a user requires already being one. `/docs/DEPLOYMENT.md` said "sign in as the first
+OWNER" and nothing created it. The only reason this was not caught earlier is that
+every development and test database is seeded from `dev-fixtures.sql`, which has an
+owner in it.
+
+**Decision.** `deploy/bootstrap-owner.sh` — an operator command on the server,
+alongside `deploy/migrate.sh` and `deploy/restore.sh`, run once in the life of a
+deployment.
+
+- It performs **the same three steps `services/user.service.ts` performs**, in the
+  same order: the Auth admin API creates the account
+  (`POST /auth/v1/admin/users`, which is exactly what `admin.auth.admin.createUser()`
+  sends); the `on_auth_user_created` trigger mirrors it into `public.users` as an
+  active SALESPERSON; the role is applied afterwards, server-side. The role is
+  never carried in the sign-up metadata, which the trigger ignores by design.
+- **No `auth.users` row is written by hand.** GoTrue owns that table and the
+  password hashing in it; a hand-made row is an account that cannot sign in.
+- It **refuses when an active OWNER exists** (exit 3) and changes nothing, so
+  re-running it is safe. `is_active` is part of that test: a deactivated owner
+  cannot sign in and so leaves the deployment just as deadlocked.
+- Confirmation is explicit twice over: `--confirm-production` is required, and at a
+  terminal the deployment is named back and `BOOTSTRAP-OWNER` must be typed. With
+  no controlling terminal the flag alone stands, so a provisioning run works.
+- A password is **generated** unless `--password-stdin` is given. `--password` as
+  an argument is refused **by name**: arguments are visible in `ps` to every user
+  on the machine and land in the shell history.
+- No secret is printed or passed on a command line. The service-role key reaches
+  curl through a configuration read from stdin; the request body lives in a `0600`
+  file in a private temporary directory removed on exit. The generated password is
+  the one deliberate exception — it is shown once, or it could never be used.
+- The result is **read back from the database** and must be an active OWNER whose
+  id and address match the Auth account. Anything less deactivates the half-made
+  profile so it cannot sign in, and fails.
+
+**Consequences.** The service-role key now has a fourth path to it, and it is a
+shell script rather than TypeScript, so `eslint.config.mjs` and the §19.4 bundle
+grep — both of which police `src/` — do not cover it. What does cover it: the key
+never leaves the server, the script has no route into the application, and
+`scripts/test-bootstrap-owner.sh` asserts the key never appears in its output.
+ADR-009's three in-application callers are unchanged; §15.7 is unchanged; no RLS
+policy, migration, schema object or service role is touched. The bootstrap writes
+exactly one row of application data — the owner it exists to create.
+
+**Alternatives considered.**
+- **Seed an OWNER in `seed.sql`.** Rejected outright: a known account with a known
+  password in every production database, and CLAUDE.md §15 forbids shipping
+  invented data. This is the failure mode the empty seed exists to prevent.
+- **A first-run setup page in the application.** Rejected: an unauthenticated
+  endpoint that can mint an OWNER, on a public origin, that must then be trusted to
+  disable itself. The guard would be the same one this script has, with a far
+  larger blast radius if it were ever wrong.
+- **`supabase.auth.admin` from a Node script on the host.** Rejected: it needs
+  `node_modules` on a server whose entire deployment is `docker compose up`, and
+  `deploy/` deliberately requires no Node, npm or PostgreSQL client tools (ADR-038).
+- **INSERT the rows directly with psql.** Rejected: it fabricates an `auth.users`
+  row, which means inventing GoTrue's password hashing and its notion of a
+  confirmed address. The account would exist and could not sign in.
+- **Reuse the E2E test's owner credentials.** Rejected: test fixtures must never
+  reach production, and a documented address and password is not a credential.
+
 ---
 
 ## How to record a decision

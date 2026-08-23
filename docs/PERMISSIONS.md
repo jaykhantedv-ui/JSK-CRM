@@ -19,6 +19,12 @@ Four values on `users.role`: `SALESPERSON`, `MANAGER`, `OWNER`, `ADMIN`.
 
 - **No self-registration.** Users are created by OWNER or ADMIN (§3.2), through a Server Action
   that uses the service-role client **only after a server-side OWNER/ADMIN check** (ADR-009).
+- **The FIRST owner is the one exception, and it is not an in-application path.** With no OWNER
+  there is nobody who may create one, so a new deployment is deadlocked. `deploy/bootstrap-owner.sh`
+  breaks that once, from the server's own shell: it refuses if an active OWNER already exists, and
+  it performs the same three steps the Server Action does — Auth admin API, mirroring trigger, role
+  applied afterwards (ADR-039). It is an operator command, not a route; nothing in the application
+  can reach it.
 - Deactivating a user (`is_active = false`) blocks login. Their records are never deleted;
   **ownership must be reassigned separately** as an explicit action.
 - **ADMIN is a system/data role, not a sales role:** no dashboards, no reassignment, no export —
@@ -345,6 +351,11 @@ executor**, and **the user-provisioning Server Action** — the last only after 
 OWNER/ADMIN check, performed **before** the admin client is touched. `lib/supabase/admin.ts`
 throws if `typeof window !== 'undefined'`, and the security suite greps the build output for the
 key.
+
+Outside `src/` there is one more holder of that key: `deploy/bootstrap-owner.sh` reads it from the
+server's environment file to call the Auth admin API once (ADR-039). It is an operator command on
+the machine, has no route into the application, and its regression test asserts the key never
+appears in its output.
 
 ---
 
