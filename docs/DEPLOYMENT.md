@@ -904,6 +904,12 @@ manager's role (ADR-040).
    the wrong place is a person seeing the wrong pipeline.
 7. **Settings** — check the taluks, material types and thresholds.
 
+Anything can be corrected afterwards: **People → Edit** changes a person's name,
+role, sales head, branches and status on one form, and saving is an update keyed
+on their id rather than a second record. **Remove** deactivates — it closes the
+database boundary for them while keeping every record they created, and
+**Restore** puts them back. There is no delete, by design (§8.8).
+
 Each person is created with a **temporary password** the administrator reads out.
 There is no self-registration and nothing is seeded (§3.2, ADR-009); ask them to
 change it after their first sign-in.

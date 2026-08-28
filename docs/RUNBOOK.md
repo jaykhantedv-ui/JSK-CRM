@@ -436,6 +436,39 @@ This deployment already has an active OWNER: owner@example.com
 Full procedure and exit codes: `/docs/DEPLOYMENT.md` §10.6. Design and the reason
 this is a script rather than a first-run web page: ADR-039.
 
+### Correcting or removing somebody
+
+```
+Settings → Organization → People → Edit
+```
+
+Name, role, sales head, branches and status, on one form. Saving is an UPDATE
+keyed on the person's id — it cannot produce a second row for them, whatever the
+form is submitted with. The reporting line is re-validated on save, so an edit
+that would break the ladder is refused with the reason rather than half-applied.
+
+Email is deliberately not editable there: it is the Auth account's identity, and
+changing it on the profile alone would leave the sign-in and the record
+disagreeing about who somebody is.
+
+**"Remove" deactivates. It is not a delete, and there is no delete.**
+
+| | |
+|---|---|
+| What it does | `is_active = false` |
+| What that closes | `current_user_id()` filters on `is_active`, so every policy in the schema resolves to nothing for them — no sign-in, no visibility, no appearance in any list |
+| What it keeps | every customer, opportunity, activity and audit row they created, still attributed to them |
+| Undo | Restore, on the same row |
+
+`users` has **no DELETE policy for any role, including the owner**, and that is
+deliberate rather than missing: `accounts.owner_id` and
+`opportunity_events.actor_id` both reference this table, so deleting a person
+either takes their work with them or orphans it (§8.8, CLAUDE.md §11).
+
+Nobody can remove themselves — the last owner locking themselves out of their own
+deployment is not a recoverable mistake. The button is not offered on your own
+row and the service refuses it regardless.
+
 ### Somebody sees the wrong pipeline
 
 Almost always the reporting line, not a policy. A **Sales Head** reads their own

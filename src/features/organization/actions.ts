@@ -93,7 +93,13 @@ export async function addPersonAction(_previous: FormState, formData: FormData):
   return { ok: true, error: null, fieldErrors: {} }
 }
 
-/** Change a person's role, reporting line, branches or active flag. */
+/**
+ * Change a person's name, role, reporting line, branches or active flag.
+ *
+ * ONE person, edited in place. `updateUser` issues an UPDATE keyed on the id, so
+ * saving an edit can never produce a second row for the same person — the
+ * failure the acceptance test looks for.
+ */
 export async function updatePersonAction(
   _previous: FormState,
   formData: FormData,
@@ -121,6 +127,48 @@ export async function updatePersonAction(
     // An empty list is meaningful: it removes a person from every branch. The
     // rows are revoked, never deleted (§8.8).
     await setUserOutlets(id, formData.getAll('outletIds').map(String).filter(Boolean))
+  } catch (error) {
+    return stateFromError(error, values)
+  }
+
+  revalidatePath('/settings/organization/people')
+  revalidatePath('/settings/organization/structure')
+  return { ok: true, error: null, fieldErrors: {} }
+}
+
+/**
+ * Remove a person from the team — and RESTORE one.
+ *
+ * **"Remove" means deactivate. Nothing in this system is ever hard-deleted**
+ * (§8.8, CLAUDE.md §11), and `users` has no DELETE policy for any role,
+ * including the owner. That is not an omission to work around here: a deleted
+ * user takes their customers, opportunities, activities and audit trail with
+ * them, or orphans every one of them. `opportunity_events.actor_id` is not null
+ * and `accounts.owner_id` references this table.
+ *
+ * Deactivating is the complete control. `current_user_id()` filters on
+ * `is_active`, so every policy in the schema resolves to nothing for them the
+ * instant this saves: they cannot sign in, cannot be seen as a teammate, and
+ * appear in no list — while every record they created stays exactly where it is,
+ * still attributed to them.
+ *
+ * Reversible, which a delete is not: the same action restores them.
+ */
+export async function setPersonActiveAction(
+  _previous: FormState,
+  formData: FormData,
+): Promise<FormState> {
+  const values = valuesFrom(formData)
+
+  try {
+    await requireOwnerOrAdmin()
+
+    const id = String(formData.get('id') ?? '')
+    if (!id) throw new AppError('VALIDATION_FAILED', 'Which person?', { field: 'id' })
+
+    // `updateUser` refuses an actor deactivating themselves, which would lock
+    // the last owner out of their own deployment.
+    await updateUser({ id, isActive: String(formData.get('isActive')) === 'true' })
   } catch (error) {
     return stateFromError(error, values)
   }

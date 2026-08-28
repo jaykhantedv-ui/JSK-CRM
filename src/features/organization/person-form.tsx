@@ -5,7 +5,7 @@ import { useActionState, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Field, Input, Select } from '@/components/ui/field'
 import { IDLE_FORM_STATE } from '@/lib/form-state'
-import { ROLE_LABELS, type Role } from '@/lib/permissions'
+import { MANAGER_ROLE_FOR, ROLE_LABELS, type Role } from '@/lib/permissions'
 import { addPersonAction } from '@/features/organization/actions'
 
 export type ManagerOption = { id: string; name: string; role: Role }
@@ -36,8 +36,10 @@ export function PersonForm({
   const [state, formAction, pending] = useActionState(addPersonAction, IDLE_FORM_STATE)
   const [role, setRole] = useState<Role>('SALESPERSON')
 
-  const requiredManagerRole: Role | null =
-    role === 'SALESPERSON' ? 'MANAGER' : role === 'MANAGER' ? 'ADMIN' : role === 'ADMIN' ? 'OWNER' : null
+  // Read from the map, never restated as a ternary chain: this is the same rule
+  // `guard_user_hierarchy()` enforces, and a second copy of it here is a form
+  // that offers a choice the database refuses.
+  const requiredManagerRole = MANAGER_ROLE_FOR[role]
   const eligible = managers.filter((person) => person.role === requiredManagerRole)
 
   return (

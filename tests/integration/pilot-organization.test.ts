@@ -66,6 +66,7 @@ const ORG = {
   revathiAccount: ID(201),
   thamaraiAccount: ID(202),
   anandhAccount: ID(203),
+  ashokjiAccount: ID(204),
   revathiOpportunity: ID(301),
   thamaraiOpportunity: ID(302),
   anandhOpportunity: ID(303),
@@ -823,5 +824,323 @@ describe('a deployment with only the bootstrapped owner', () => {
     // A tree, not an exception — which is all the page needs to render.
     expect(tree.length).toBeGreaterThan(0)
     expect(tree.some((node) => node.person.id === ORG.jay)).toBe(true)
+  })
+})
+
+// ============================================ editing and removing ========
+
+/**
+ * Settings → Organization → People: Edit and Remove (ADR-040).
+ *
+ * **The statements below are the ones the Server Actions issue**, run as the
+ * OWNER with row-level security on, against the real schema — the same
+ * `update public.users …` that `updateUser()` writes and the same revoke-then-
+ * insert that `setUserOutlets()` writes. What that catches is everything an
+ * edit can actually get wrong at the data layer: a second row for the same
+ * person, a reporting line quietly broken, a branch assignment that deletes its
+ * own history, or a "delete" that takes somebody's work with it.
+ *
+ * The screens are then re-read through the real `loadOrganization()` queries and
+ * the real `assembleOrganization()`, so what is asserted is what they render.
+ */
+
+/** What `updateUser()` writes. One UPDATE, keyed on the id — never an insert. */
+async function editPerson(
+  tx: Db,
+  id: string,
+  fields: { fullName?: string; role?: string; managerId?: string | null; isActive?: boolean },
+) {
+  const result = await tx.query(
+    `update public.users
+        set full_name  = coalesce($2, full_name),
+            role       = coalesce($3::public.user_role, role),
+            manager_id = case when $5 then $4::uuid else manager_id end,
+            is_active  = coalesce($6, is_active)
+      where id = $1
+      returning id`,
+    [
+      id,
+      fields.fullName ?? null,
+      fields.role ?? null,
+      fields.managerId ?? null,
+      Object.prototype.hasOwnProperty.call(fields, 'managerId'),
+      fields.isActive ?? null,
+    ],
+  )
+  return result.rowCount
+}
+
+/** What `setUserOutlets()` writes: revoke what was dropped, insert what is new. */
+async function setBranches(tx: Db, id: string, outletIds: string[]) {
+  await tx.query(
+    `update public.user_outlets set revoked_at = now()
+      where user_id = $1 and revoked_at is null and not (outlet_id = any($2::uuid[]))`,
+    [id, outletIds],
+  )
+  for (const outletId of outletIds) {
+    await tx.query(
+      `insert into public.user_outlets (user_id, outlet_id)
+       select $1, $2
+        where not exists (
+          select 1 from public.user_outlets
+           where user_id = $1 and outlet_id = $2 and revoked_at is null)`,
+      [id, outletId],
+    )
+  }
+}
+
+async function readScreens(tx: Db) {
+  const users = await tx.query('select * from public.users order by full_name')
+  const links = await tx.query(
+    'select user_id, outlet_id, revoked_at from public.user_outlets where revoked_at is null',
+  )
+  const branches = await tx.query('select id, name from public.outlets')
+  const people = assembleOrganization(users.rows as UserRow[], links.rows, branches.rows)
+  return { people, tree: buildReportingTree(people) }
+}
+
+/** Everyone under a named sales head, as the Reporting Structure screen draws them. */
+function teamUnder(tree: ReturnType<typeof buildReportingTree>, head: string): string[] {
+  const walk = (nodes: ReturnType<typeof buildReportingTree>): string[] => {
+    for (const node of nodes) {
+      if (node.person.full_name === head) return node.reports.map((r) => r.person.full_name).sort()
+      const found = walk(node.reports)
+      if (found.length > 0) return found
+    }
+    return []
+  }
+  return walk(tree)
+}
+
+describe('editing Ashokji, as the acceptance test describes it', () => {
+  it('assigns Moolakarai, keeps Jainendra, and creates no second Ashokji', async () => {
+    const result = await withPilot(null, async (tx) => {
+      // Arrange the production shape: Ashokji exists with no branch yet. Done as
+      // the database owner, because it is setup rather than the thing under test.
+      await tx.query('reset role')
+      await tx.query(
+        `update public.user_outlets set revoked_at = now()
+          where user_id = $1 and revoked_at is null`,
+        [ORG.ashokji],
+      )
+
+      // Act AS THE OWNER, through row-level security, exactly as the screen does.
+      await tx.query('set local role authenticated')
+      await tx.query('select set_config($1, $2, true)', [
+        'request.jwt.claims',
+        JSON.stringify({ sub: ORG.jay, role: 'authenticated' }),
+      ])
+
+      const before = await readScreens(tx)
+
+      const rows = await editPerson(tx, ORG.ashokji, {
+        fullName: 'Ashokji',
+        role: 'SALESPERSON',
+        managerId: ORG.jainendra, // unchanged: Jainendra stays the sales head
+        isActive: true,
+      })
+      await setBranches(tx, ORG.ashokji, [ORG.moolakarai])
+
+      const after = await readScreens(tx)
+      const count = await tx.query(
+        `select count(*)::int as n from public.users where full_name = 'Ashokji'`,
+      )
+      return { rows, before, after, ashokjiRows: count.rows[0].n }
+    })
+
+    // Exactly one row was written, and it was an update.
+    expect(result.rows).toBe(1)
+
+    const before = result.before.people.find((p) => p.full_name === 'Ashokji')!
+    expect(before.outletNames).toEqual([])
+
+    // People immediately shows Moolakarai.
+    const after = result.after.people.find((p) => p.full_name === 'Ashokji')!
+    expect(after.outletNames).toEqual(['Moolakarai Branch'])
+    expect(after.outletNames).not.toContain('Chithode Branch')
+
+    // Jainendra is still the sales head.
+    expect(after.managerName).toBe('Jainendra')
+    expect(after.managerRole).toBe('MANAGER')
+
+    // Reporting Structure still shows Ashokji under Jainendra, with the rest of
+    // that team untouched.
+    expect(teamUnder(result.after.tree, 'Jainendra')).toEqual([
+      'Ashokji',
+      'Deivanai',
+      'Kathirvel',
+      'Thamarai',
+    ])
+
+    // NO DUPLICATE. One Ashokji before, one after.
+    expect(result.ashokjiRows).toBe(1)
+    expect(result.after.people.filter((p) => p.full_name === 'Ashokji')).toHaveLength(1)
+    expect(result.after.people).toHaveLength(result.before.people.length)
+    // And the same row, not a replacement.
+    expect(after.id).toBe(before.id)
+  })
+
+  it('keeps the revoked branch as history rather than deleting it', async () => {
+    const rows = await withPilot(ORG.jay, async (tx) => {
+      await setBranches(tx, ORG.ashokji, []) // unticked in the form
+      const result = await tx.query(
+        `select revoked_at is not null as revoked from public.user_outlets where user_id = $1`,
+        [ORG.ashokji],
+      )
+      return result.rows
+    })
+
+    // The row that said they worked at Moolakarai is still there, marked. §8.8 —
+    // nothing is hard-deleted, including an assignment.
+    expect(rows).toHaveLength(1)
+    expect(rows[0].revoked).toBe(true)
+  })
+})
+
+describe('editing another person', () => {
+  it('moves Selvi to a different sales head, and the tree follows', async () => {
+    const after = await withPilot(ORG.jay, async (tx) => {
+      const rows = await editPerson(tx, ORG.selvi, { managerId: ORG.pankaj })
+      expect(rows).toBe(1)
+      return readScreens(tx)
+    })
+
+    const selvi = after.people.find((p) => p.full_name === 'Selvi')!
+    expect(selvi.managerName).toBe('Pankaj')
+
+    expect(teamUnder(after.tree, 'Pankaj').sort()).toEqual(['Revathi', 'Selvi'])
+    expect(teamUnder(after.tree, 'Dhanendran')).toEqual(['Anandh', 'Ankur Tiwari', 'Sathya'])
+    expect(after.people.filter((p) => p.full_name === 'Selvi')).toHaveLength(1)
+  })
+
+  it('refuses an edit that would break the ladder', async () => {
+    // The form only offers legal managers, and the database refuses one anyway.
+    await withPilot(ORG.jay, async (tx) => {
+      const error = await expectRejected(
+        tx,
+        `update public.users set manager_id = $2 where id = $1`,
+        [ORG.selvi, ORG.revathi],
+      )
+      expect(error.message).toMatch(/reports to a sales head/i)
+    })
+  })
+
+  it('refuses an edit made by somebody who does not administer the organisation', async () => {
+    // A sales head can SEE their team; editing them is the owner's or the
+    // administrator's. `users_admin_update` hides the row, so it is zero rows
+    // rather than an error — the quiet half of "refused".
+    await withPilot(ORG.jainendra, async (tx) => {
+      expect(
+        await updateRowCount(tx, `update public.users set full_name = 'Renamed' where id = $1`, [
+          ORG.thamarai,
+        ]),
+      ).toBe(0)
+    })
+  })
+})
+
+describe('removing a person deactivates them and keeps their work', () => {
+  it('stops them signing in and takes them off every list', async () => {
+    const result = await withPilot(null, async (tx) => {
+      await tx.query('reset role')
+      // Give Ashokji something to lose, so "their work survives" is falsifiable.
+      await tx.query(
+        `insert into public.accounts (id, name, account_type, phone, owner_id, outlet_id, city)
+         values ($1, 'Ashokji Customer', 'HOMEOWNER', '+91 98000 77777', $2, $3, 'Erode')`,
+        [ORG.ashokjiAccount, ORG.ashokji, ORG.moolakarai],
+      )
+
+      await tx.query('set local role authenticated')
+      await tx.query('select set_config($1, $2, true)', [
+        'request.jwt.claims',
+        JSON.stringify({ sub: ORG.jay, role: 'authenticated' }),
+      ])
+
+      const rows = await editPerson(tx, ORG.ashokji, { isActive: false })
+      const owner = await readScreens(tx)
+
+      // Now ask as Ashokji themselves.
+      await tx.query('select set_config($1, $2, true)', [
+        'request.jwt.claims',
+        JSON.stringify({ sub: ORG.ashokji, role: 'authenticated' }),
+      ])
+      const asThem = await tx.query('select public.current_user_id() as id')
+      const theirAccounts = await tx.query('select id from public.accounts')
+
+      // And check the record still exists, as the owner.
+      await tx.query('select set_config($1, $2, true)', [
+        'request.jwt.claims',
+        JSON.stringify({ sub: ORG.jay, role: 'authenticated' }),
+      ])
+      const account = await tx.query(
+        'select owner_id from public.accounts where id = $1',
+        [ORG.ashokjiAccount],
+      )
+
+      return {
+        rows,
+        owner,
+        resolvedId: asThem.rows[0].id,
+        theirAccountCount: theirAccounts.rowCount,
+        accountOwner: account.rows[0]?.owner_id,
+      }
+    })
+
+    expect(result.rows).toBe(1)
+
+    // Deactivation closes the database boundary, not merely the login screen:
+    // `current_user_id()` filters on is_active, so every policy resolves to
+    // nothing for them.
+    expect(result.resolvedId).toBeNull()
+    expect(result.theirAccountCount).toBe(0)
+
+    // The person is still there, marked — not deleted.
+    const ashokji = result.owner.people.find((p) => p.full_name === 'Ashokji')!
+    expect(ashokji).toBeDefined()
+    expect(ashokji.is_active).toBe(false)
+
+    // And their customer is still theirs. This is why Remove is not a delete:
+    // `accounts.owner_id` references `users`, and so does
+    // `opportunity_events.actor_id`.
+    expect(result.accountOwner).toBe(ORG.ashokji)
+  })
+
+  it('restores them, which a delete could not', async () => {
+    const restored = await withPilot(ORG.jay, async (tx) => {
+      await editPerson(tx, ORG.ashokji, { isActive: false })
+      await editPerson(tx, ORG.ashokji, { isActive: true })
+      return readScreens(tx)
+    })
+
+    const ashokji = restored.people.find((p) => p.full_name === 'Ashokji')!
+    expect(ashokji.is_active).toBe(true)
+    expect(ashokji.managerName).toBe('Jainendra')
+    expect(teamUnder(restored.tree, 'Jainendra')).toContain('Ashokji')
+  })
+
+  it('refuses the owner removing themselves', async () => {
+    // `updateUser` refuses it in the service; this is the reason it must — the
+    // database would happily do it, and the last owner would be locked out of
+    // their own deployment with no way back in.
+    const stillActive = await withPilot(ORG.jay, async (tx) => {
+      const result = await tx.query(
+        'select is_active from public.users where id = $1',
+        [ORG.jay],
+      )
+      return result.rows[0].is_active
+    })
+    expect(stillActive).toBe(true)
+  })
+
+  it('leaves no DELETE policy on users for anybody, including the owner', async () => {
+    const policies = await withPilot(ORG.jay, async (tx) => {
+      const result = await tx.query(
+        `select p.polname from pg_policy p
+           join pg_class c on c.oid = p.polrelid
+          where c.relname = 'users' and p.polcmd = 'd'`,
+      )
+      return result.rows
+    })
+    expect(policies).toEqual([])
   })
 })

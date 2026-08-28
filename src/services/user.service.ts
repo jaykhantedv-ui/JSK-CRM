@@ -207,30 +207,40 @@ export async function updateUser(input: UpdateUserInput): Promise<UserRow> {
   }
   const { id, fullName, role, phone, isActive, managerId } = parsed.data
 
-  if (id === actor.id && isActive === false) {
-    throw new AppError('CONFLICT', 'You cannot deactivate your own account.')
-  }
-  if (id === actor.id && role !== undefined && role !== actor.role) {
-    throw new AppError('CONFLICT', 'You cannot change your own role.')
-  }
-  if (id === actor.id && managerId !== undefined) {
-    throw new AppError('CONFLICT', 'You cannot change who you report to.')
-  }
-
   const supabase = await createSupabaseServerClient()
+
+  // Read the stored row first. Through the caller's own session, so RLS decides
+  // whether they may see this person at all, and so every check below compares
+  // against what IS rather than against what was submitted.
+  const { data: existing, error: readError } = await supabase
+    .from('users')
+    .select('role, manager_id')
+    .eq('id', id)
+    .maybeSingle()
+  if (readError) throw fromPostgrestError(readError)
+  if (!existing) throw new AppError('NOT_FOUND', 'That person is not on the team.')
+
+  // The self-edit guards, COMPARED AGAINST THE STORED VALUE. An edit form posts
+  // every field it renders, so an owner correcting their own name resubmits
+  // their own role and their own (empty) reporting line — which is not an
+  // attempt to change either, and refusing it made the owner the one person who
+  // could not be edited.
+  if (id === actor.id) {
+    if (isActive === false) {
+      throw new AppError('CONFLICT', 'You cannot deactivate your own account.')
+    }
+    if (role !== undefined && role !== existing.role) {
+      throw new AppError('CONFLICT', 'You cannot change your own role.')
+    }
+    if (managerId !== undefined && (managerId ?? null) !== existing.manager_id) {
+      throw new AppError('CONFLICT', 'You cannot change who you report to.')
+    }
+  }
 
   // Validate the line against the role the person will HAVE, not the one they
   // have now: changing both at once is the ordinary case when someone is
   // promoted to sales head.
   if (role !== undefined || managerId !== undefined) {
-    const { data: existing, error: readError } = await supabase
-      .from('users')
-      .select('role, manager_id')
-      .eq('id', id)
-      .maybeSingle()
-    if (readError) throw fromPostgrestError(readError)
-    if (!existing) throw new AppError('NOT_FOUND', 'That person is not on the team.')
-
     await assertReportingLine(
       role ?? existing.role,
       managerId === undefined ? existing.manager_id : managerId,
