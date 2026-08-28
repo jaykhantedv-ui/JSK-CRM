@@ -7,7 +7,13 @@ import {
   type PersonRow,
   type ReportingNode,
 } from '@/lib/organization'
-import { MANAGER_ROLE_FOR, canReportTo, roleLabel, type Role } from '@/lib/permissions'
+import {
+  MANAGER_ROLE_FOR,
+  canAdministerOwner,
+  canReportTo,
+  roleLabel,
+  type Role,
+} from '@/lib/permissions'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { emailSchema, fullNameSchema, optionalPhoneSchema, roleSchema, uuidSchema } from '@/lib/validation'
@@ -115,6 +121,22 @@ async function assertReportingLine(
   }
 }
 
+/**
+ * Only an OWNER may create, alter or deactivate an OWNER (ADR-042).
+ *
+ * `guard_owner_role()` in migration 032 is the control for anything written
+ * through the caller's own session. **This is the control for `createUser`**,
+ * which writes the role with the SERVICE-ROLE client — `auth.uid()` is null
+ * there, so the trigger exempts it by design (§15.7). Reversing that order, or
+ * omitting this, is how an administrator mints themselves an owner.
+ */
+async function assertMayAdministerOwner(actor: SessionUser, targetRole?: Role): Promise<void> {
+  if (targetRole !== 'OWNER') return
+  if (!canAdministerOwner(actor)) {
+    throw forbidden('Only the owner can make somebody an owner.')
+  }
+}
+
 /** OWNER and ADMIN manage users (§3.1). Nobody else, in any circumstance. */
 async function assertCanManageUsers(): Promise<SessionUser> {
   const user = await requireUser()
@@ -146,6 +168,7 @@ export async function createUser(input: CreateUserInput): Promise<UserRow> {
 
   // Before the admin client is touched, and before an Auth account exists: a
   // rejected line after `createUser` would leave an account to clean up.
+  await assertMayAdministerOwner(actor, role)
   await assertReportingLine(role, managerId)
 
   const admin = createAdminClient()
@@ -219,6 +242,14 @@ export async function updateUser(input: UpdateUserInput): Promise<UserRow> {
     .maybeSingle()
   if (readError) throw fromPostgrestError(readError)
   if (!existing) throw new AppError('NOT_FOUND', 'That person is not on the team.')
+
+  // Promoting somebody to owner, or touching the one who is. The database
+  // refuses both for a non-owner (032); saying so here gives a sentence rather
+  // than a silent zero-row update.
+  await assertMayAdministerOwner(actor, role)
+  if (existing.role === 'OWNER' && !canAdministerOwner(actor)) {
+    throw forbidden("Only the owner can change the owner's account.")
+  }
 
   // The self-edit guards, COMPARED AGAINST THE STORED VALUE. An edit form posts
   // every field it renders, so an owner correcting their own name resubmits

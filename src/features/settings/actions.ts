@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 
 import { AppError } from '@/lib/errors'
+import { requireRole } from '@/services/auth.service'
 import { stateFromError, valuesFrom, type FormState } from '@/lib/form-state'
 import {
   isEditableSettingKey,
@@ -30,6 +31,11 @@ export async function updateSettingAction(
   const values = valuesFrom(formData)
 
   try {
+    // OWNER only (ADR-042). `system_settings_update` is the control and holds
+    // against a direct PostgREST call; this refuses in words, first, so an
+    // administrator gets a sentence rather than a silent no-op.
+    await requireRole('OWNER')
+
     if (!isEditableSettingKey(key)) {
       throw new AppError('FORBIDDEN', 'That setting cannot be changed here.')
     }

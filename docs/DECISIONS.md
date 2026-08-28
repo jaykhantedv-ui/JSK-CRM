@@ -2318,6 +2318,108 @@ test over hand-written rows could not notice.
 - **Fix it on the People page only.** Rejected: the Reporting Structure screen
   and every future organisation query would each grow their own copy. One loader.
 
+### ADR-042 — The administrator runs the business; the owner controls the system
+
+**Status:** Accepted
+**Date:** 2026-08-23   **Decided by:** Project Owner / Engineering
+
+**Context.** The administrator could not open Dashboard, Team or any report — a
+Server Components error on each. ADR-040 widened ADMIN's read in the database and
+in the route guards, and left four SERVICE-layer gates on `isManagerOrAbove()`,
+which excludes ADMIN by design. The worst possible shape: the route said yes and
+the service threw.
+
+Auditing that led to two defects that were not about a screen at all. Both were
+reproduced against a real database, as ADMIN, in plain SQL — no interface
+involved, which is the only kind that counts (§15):
+
+```sql
+-- 1. every §24 business rule was writable by an administrator
+update public.system_settings set value = '99999999'
+ where key = 'high_value_threshold_paise';                    -- SUCCEEDED
+
+-- 2. FULL PRIVILEGE ESCALATION, in two statements
+update public.users set role = 'OWNER', manager_id = null where id = <any>;  -- SUCCEEDED
+update public.users set is_active = false where role = 'OWNER';              -- SUCCEEDED
+```
+
+The second is the serious one. `current_user_id()` filters on `is_active`, so
+deactivating the owner strips them of every policy in the schema instantly — an
+administrator could appoint themselves a second owner and lock the real one out,
+with no way back short of `deploy/bootstrap-owner.sh`. It had never been reachable
+through the interface, and it was always reachable with a JWT and a PostgREST
+call.
+
+Nothing stopped the demotion before except coincidence: the fixture owner had a
+direct report, so `guard_user_hierarchy()` fired first with "move their team
+first". Clearing `manager_id` in the same statement went straight through.
+
+**Decision.** One line, drawn where the business draws it:
+
+> **ADMIN can run the business. OWNER can run the business and control the system.**
+
+| | ADMIN | OWNER |
+|---|---|---|
+| Read every operational record | yes | yes |
+| Dashboard, Team, Reports, Export | yes | yes |
+| Import | yes | yes |
+| People, branches, reporting structure | yes | yes |
+| The §24 business rules (`system_settings`) | **no** | yes |
+| Create, alter or deactivate an OWNER | **no** | yes |
+| Archive, reassign, write business records | **no** | yes |
+| Roll back an import · set the company target | **no** | yes |
+
+- **One gate, four services.** `analytics`, `team`, `target` and `export` each
+  wrote their own copy of the management check. They now defer to
+  `requireManagementAccess()`, which mirrors `assert_management_access()` in the
+  database. That is the actual fix for the reported error, and the reason it
+  could happen: one rule in five places, widened in three.
+- **`canExportCsv` is defined as `canViewTeamDashboard`.** An export is a report
+  with a download button; it can carry nothing the screen does not, because both
+  read through the same RLS-bounded queries.
+- **`system_settings_insert` / `_update` become `is_owner()`** (migration 032).
+  SELECT is unchanged — probabilities and the taluk list are needed to render
+  almost any screen. The maintenance cron writes its two ADR-014 counters through
+  the service role and is unaffected.
+- **`guard_owner_role()`** — a trigger, separate from `guard_user_hierarchy()`,
+  because one protects a PRIVILEGE and the other a SHAPE. Only an OWNER may
+  create an owner or touch one. The triggers are renamed
+  `users_guard_1_owner_privilege` and `users_guard_2_hierarchy_shape`:
+  PostgreSQL fires BEFORE triggers in name order, and the privilege refusal has
+  to be the one that answers, or an administrator is told to "move their team
+  first" when what actually happened is that they may not touch the owner.
+- **`/settings` splits.** The page is reachable by OWNER and ADMIN — the
+  organisation links are the administrator's — and the business-rules card is the
+  owner's alone, with a sentence in its place for everyone else. The navigation
+  item follows `canOpenSettings`.
+- The service checks its own version of each rule BEFORE the database sees it, so
+  an administrator gets a sentence rather than a silent zero-row update. In
+  `createUser` that check is the ONLY control, because that path writes through
+  the service-role client where `auth.uid()` is null and the trigger exempts it —
+  the ordering ADR-009 already requires.
+
+**Consequences.** The administrator can now do every operational thing the brief
+lists and none of the configuration. The owner is unchanged. `deploy/bootstrap-owner.sh`
+still works: it runs as `supabase_admin` with no `auth.uid()`, which the guard
+exempts, and `scripts/test-bootstrap-owner.sh` passes unchanged.
+
+`tests/integration/authorization-audit.test.ts` is the standing proof — thirty-one
+checks, every one made as the restricted role against the database, including both
+escalation paths stated as the SQL that used to work.
+
+**Alternatives considered.**
+- **Make Vinay an OWNER.** Rejected, and explicitly excluded by the brief: it
+  answers the symptom by removing the distinction the roles exist to draw.
+- **Widen `isManagerOrAbove()` to include ADMIN.** Rejected: that predicate also
+  gates archiving and reassignment, which are acts of sales management. Widening
+  it would have given the administrator write access to business records as a
+  side effect of fixing a dashboard.
+- **Gate the settings form in the UI only.** Rejected outright: a hidden form is
+  not a control (§15), and the defect was found with SQL, not a browser.
+- **Fold the owner check into `guard_user_hierarchy()`.** Rejected: a reviewer
+  asking "what stops an administrator taking over" should find one function whose
+  name answers, not a clause inside a shape check.
+
 ---
 
 ## How to record a decision

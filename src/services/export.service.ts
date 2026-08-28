@@ -132,10 +132,15 @@ export async function buildExport(
 ): Promise<ExportResult> {
   const user = await requireUser()
 
-  // §3.1: MANAGER ✔ OWNER ✔ SALESPERSON ✘ ADMIN ✘. The ADMIN refusal is
-  // deliberate and is tested against the route, not the button (C-2, ADR-017).
+  // SALES HEAD ✔ OWNER ✔ ADMIN ✔ SALESPERSON ✘ (ADR-042). `canExportCsv` is
+  // defined as `canViewTeamDashboard`, so the download can never offer a role
+  // more than the screen it comes from. The rows themselves are bounded by RLS
+  // regardless — this decides who may ask, not what comes back.
+  //
+  // Tested against the ROUTE, not the button (C-2): a salesperson who types the
+  // export URL is refused here, on the server.
   if (!canExportCsv(user)) {
-    throw forbidden('Exporting is available to managers and the owner only.')
+    throw forbidden('Exporting is available to sales heads, the administrator and the owner.')
   }
 
   const period = parsePeriod(raw)

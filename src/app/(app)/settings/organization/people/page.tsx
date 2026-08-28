@@ -7,7 +7,7 @@ import { buttonClass } from '@/components/ui/button'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { PersonActiveToggle } from '@/features/organization/person-actions'
 import { PersonForm, type ManagerOption } from '@/features/organization/person-form'
-import { ROLE_LABELS } from '@/lib/permissions'
+import { ROLE_LABELS, canAdministerOwner } from '@/lib/permissions'
 import { listOutlets } from '@/services/outlet.service'
 import { requireUser } from '@/services/auth.service'
 import { loadOrganization } from '@/services/user.service'
@@ -94,22 +94,34 @@ export default async function PeoplePage() {
                       </td>
                       <td className="py-2">
                         <div className="flex flex-wrap items-center justify-end gap-2">
-                          <Link
-                            href={toRoute(`/settings/organization/people/${person.id}/edit`)}
-                            className={buttonClass('secondary', 'sm')}
-                            aria-label={`Edit ${person.full_name}`}
-                          >
-                            Edit
-                          </Link>
+                          {/* The owner's row is the owner's alone (ADR-042).
+                              `guard_owner_role()` refuses an administrator's
+                              write; not offering the controls is what stops them
+                              filling in a form that cannot save. */}
+                          {person.role === 'OWNER' && !canAdministerOwner(actor) ? (
+                            <span className="text-xs text-muted-foreground">
+                              Owner — not editable
+                            </span>
+                          ) : (
+                            <Link
+                              href={toRoute(`/settings/organization/people/${person.id}/edit`)}
+                              className={buttonClass('secondary', 'sm')}
+                              aria-label={`Edit ${person.full_name}`}
+                            >
+                              Edit
+                            </Link>
+                          )}
                           {/* Removing yourself would lock the last owner out of
                               their own deployment. `updateUser` refuses it
                               server-side; the button is not offered either. */}
-                          <PersonActiveToggle
-                            id={person.id}
-                            fullName={person.full_name}
-                            isActive={person.is_active}
-                            disabled={person.id === actor.id}
-                          />
+                          {person.role === 'OWNER' && !canAdministerOwner(actor) ? null : (
+                            <PersonActiveToggle
+                              id={person.id}
+                              fullName={person.full_name}
+                              isActive={person.is_active}
+                              disabled={person.id === actor.id}
+                            />
+                          )}
                         </div>
                       </td>
                     </tr>

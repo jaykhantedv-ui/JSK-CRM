@@ -350,19 +350,52 @@ describe('owner and admin', () => {
     })
   })
 
-  it('an admin still administers users, outlets, settings and imports', async () => {
+  it('an admin still administers users, outlets and imports', async () => {
     await asUser(db, USERS.admin, async (tx) => {
       expect((await visibleIds(tx, 'users')).length).toBeGreaterThan(1)
       expect((await visibleIds(tx, 'outlets')).length).toBe(3)
+      expect((await tx.query('select count(*)::int as n from public.system_settings')).rows[0].n)
+        .toBeGreaterThan(0)
+    })
+  })
 
-      const settings = await tx.query('select count(*)::int as n from public.system_settings')
-      expect(settings.rows[0].n).toBeGreaterThan(0)
+  it('an admin CANNOT change a global business rule (ADR-042)', async () => {
+    // Found by the audit, reproduced exactly like this: an administrator could
+    // move the high-value threshold, the taluk list, the stage probabilities and
+    // every other §24 value with one PostgREST call. Those are the Project
+    // Owner's, and configuring the system is not running the business.
+    await asUser(db, USERS.admin, async (tx) => {
+      expect(
+        await updateRowCount(
+          tx,
+          `update public.system_settings set value = '31' where key = 'account_dormancy_days'`,
+        ),
+      ).toBe(0)
+      expect(
+        await updateRowCount(
+          tx,
+          `update public.system_settings set value = '99999999' where key = 'high_value_threshold_paise'`,
+        ),
+      ).toBe(0)
+    })
 
-      const affected = await updateRowCount(
-        tx,
-        `update public.system_settings set value = '31' where key = 'account_dormancy_days'`,
+    // Unchanged afterwards, read back outside the caller's transaction.
+    await asUser(db, USERS.owner, async (tx) => {
+      const { rows } = await tx.query(
+        `select value::text as v from public.system_settings where key = 'high_value_threshold_paise'`,
       )
-      expect(affected).toBe(1)
+      expect(rows[0].v).toBe('30000000')
+    })
+  })
+
+  it('the OWNER still changes every business rule', async () => {
+    await asUser(db, USERS.owner, async (tx) => {
+      expect(
+        await updateRowCount(
+          tx,
+          `update public.system_settings set value = '31' where key = 'account_dormancy_days'`,
+        ),
+      ).toBe(1)
     })
   })
 

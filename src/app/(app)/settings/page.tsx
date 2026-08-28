@@ -8,7 +8,7 @@ import { toRoute } from '@/lib/routes'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDateTime } from '@/lib/dates'
 import { formatPaise } from '@/lib/money'
-import { canEditSettings } from '@/lib/permissions'
+import { canEditSettings, canOpenSettings } from '@/lib/permissions'
 import { updateSettingAction } from '@/features/settings/actions'
 import { SettingForm } from '@/features/settings/setting-form'
 import { requireUser } from '@/services/auth.service'
@@ -92,10 +92,18 @@ const FIELDS: {
 
 export default async function SettingsPage() {
   const user = await requireUser()
-  if (!canEditSettings(user)) return <ForbiddenState
-      backHref="/today" title="This screen is not part of your role"
-      description="Ask the owner or an administrator if you need it."
-    />
+  // Reachable by OWNER and ADMIN: the organisation links below are the
+  // administrator's, and the business rules are the owner's (ADR-042).
+  if (!canOpenSettings(user)) {
+    return (
+      <ForbiddenState
+        backHref="/today"
+        title="This screen is not part of your role"
+        description="Ask the owner or an administrator if you need it."
+      />
+    )
+  }
+  const mayEditRules = canEditSettings(user)
 
   const settings = await getAllSettings()
 
@@ -135,6 +143,23 @@ export default async function SettingsPage() {
         </CardBody>
       </Card>
 
+      {/* OWNER only. Every value here changes how the CRM behaves for everybody,
+          without a deploy — configuring the system rather than running the
+          business (ADR-042). `system_settings_update` is the control; this
+          decides what is offered. */}
+      {!mayEditRules ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Business rules</CardTitle>
+          </CardHeader>
+          <CardBody className="pt-0">
+            <p className="text-sm text-muted-foreground">
+              The thresholds, taluk list, stage probabilities and schedules are the
+              owner&rsquo;s to set. Ask them if one needs changing.
+            </p>
+          </CardBody>
+        </Card>
+      ) : (
       <Card>
         <CardHeader>
           <CardTitle>Business rules</CardTitle>
@@ -157,6 +182,7 @@ export default async function SettingsPage() {
           ))}
         </CardBody>
       </Card>
+      )}
 
       {/*
         ADR-014. Operational state, shown but NOT editable: these two keys are

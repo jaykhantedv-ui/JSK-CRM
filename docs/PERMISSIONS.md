@@ -360,6 +360,27 @@ personal data**.
 confirms the record exists. §12.6's "Forbidden" state is reserved for route-level denial where no
 record identity is revealed.
 
+**ADMIN runs the business; OWNER runs the business and controls the system (ADR-042).**
+
+| | SALESPERSON | SALES HEAD | ADMIN | OWNER |
+|---|---|---|---|---|
+| Own records | ✔ | ✔ | ✔ | ✔ |
+| Direct reports' records | — | ✔ | ✔ | ✔ |
+| Every operational record | — | — | ✔ | ✔ |
+| Dashboard · Team · Reports · Export | — | ✔ | ✔ | ✔ |
+| Import | — | — | ✔ | ✔ |
+| People · branches · reporting structure | — | — | ✔ | ✔ |
+| Archive · reassign · write business records | own | ✔ | — | ✔ |
+| The §24 business rules (`system_settings`) | — | — | **—** | ✔ |
+| Create, alter or deactivate an OWNER | — | — | **—** | ✔ |
+| Roll back an import · set the company target | — | — | — | ✔ |
+
+The two bold cells were found open by the ADR-042 audit and closed by migration
+032: an administrator could rewrite every business threshold, and could appoint a
+second owner and deactivate the real one — both with a JWT and a PostgREST call,
+neither reachable through the interface. `guard_owner_role()` and
+`system_settings_update` are the controls.
+
 **Three controls, and only one of them is authorization (ADR-040).**
 
 | | What it decides | Where | Removing it |

@@ -471,16 +471,18 @@ describe('settings permissions (§15.5)', () => {
     }
   })
 
-  it('an ADMIN can, and so can the OWNER', async () => {
+  it('the OWNER can, and an ADMIN cannot (ADR-042)', async () => {
     await db.query('begin')
     try {
+      // ADR-042 moved the business rules to the owner alone. An administrator
+      // runs the business; it does not set the thresholds the business runs on.
       await becomeUser(db, USERS.admin)
       expect(
         await updateRowCount(
           db,
           `update public.system_settings set value = '40000000' where key = 'high_value_threshold_paise'`,
         ),
-      ).toBe(1)
+      ).toBe(0)
 
       await becomeUser(db, USERS.owner)
       expect(

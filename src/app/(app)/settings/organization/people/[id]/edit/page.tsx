@@ -6,7 +6,9 @@ import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card'
 import { buttonClass } from '@/components/ui/button'
 import { PersonEditForm } from '@/features/organization/person-edit-form'
 import type { ManagerOption } from '@/features/organization/person-form'
-import { ROLE_LABELS } from '@/lib/permissions'
+import { ForbiddenState } from '@/components/shared/states'
+import { ROLE_LABELS, canAdministerOwner } from '@/lib/permissions'
+import { requireUser } from '@/services/auth.service'
 import { listOutlets } from '@/services/outlet.service'
 import { loadOrganization } from '@/services/user.service'
 
@@ -30,13 +32,27 @@ export const metadata: Metadata = { title: 'Edit person · JSK CRM' }
 export default async function EditPersonPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
 
-  const [people, branches] = await Promise.all([
+  const [actor, people, branches] = await Promise.all([
+    requireUser(),
     loadOrganization(),
     listOutlets({ includeInactive: true }),
   ])
 
   const person = people.find((candidate) => candidate.id === id)
   if (!person) notFound()
+
+  // Only an owner may touch an owner's account (ADR-042). `guard_owner_role()`
+  // is the control; refusing here is what stops an administrator filling in a
+  // form that could never save.
+  if (person.role === 'OWNER' && !canAdministerOwner(actor)) {
+    return (
+      <ForbiddenState
+        backHref="/settings/organization/people"
+        title="The owner's account is the owner's to change"
+        description="Roles, status and the reporting line for the owner can only be set by the owner."
+      />
+    )
+  }
 
   // Anyone who could be somebody's manager. The form narrows this by the role
   // being saved; deciding the pairing here as well would put the rule in two

@@ -5,8 +5,10 @@ import {
   canEditSettings,
   canExportCsv,
   canImportCsv,
+  canAdministerOwner,
   canManageOrganization,
   canManageUsers,
+  canOpenSettings,
   canReadRecord,
   canReassign,
   canViewTeamDashboard,
@@ -153,10 +155,16 @@ describe('the capability matrix (§3.1)', () => {
   it.each([
     ['reassign', canReassign, { SALESPERSON: false, MANAGER: true, OWNER: true, ADMIN: false }],
     ['archive', canArchive, { SALESPERSON: false, MANAGER: true, OWNER: true, ADMIN: false }],
-    ['export CSV', canExportCsv, { SALESPERSON: false, MANAGER: true, OWNER: true, ADMIN: false }],
+    // ADR-042: export is a report with a download button, so it follows the
+    // dashboard exactly rather than restating the roles.
+    ['export CSV', canExportCsv, { SALESPERSON: false, MANAGER: true, OWNER: true, ADMIN: true }],
     ['import CSV', canImportCsv, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
     ['manage users', canManageUsers, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
-    ['edit settings', canEditSettings, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
+    // ADR-042: the global business rules are the owner's. An administrator runs
+    // the business; it does not configure the system.
+    ['edit settings', canEditSettings, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: false }],
+    ['open settings', canOpenSettings, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: true }],
+    ['administer the owner', canAdministerOwner, { SALESPERSON: false, MANAGER: false, OWNER: true, ADMIN: false }],
     // ADR-040: the administrator reads every operational record, so a report it
     // could assemble row by row is not withheld. It still archives, reassigns
     // and exports nothing.

@@ -6,7 +6,7 @@ import {
 import type { SessionUser } from '@/types/domain'
 import {
   canViewTeamDashboard,
-  canEditSettings,
+  canOpenSettings,
   canImportCsv,
   isManagerOrAbove,
 } from '@/lib/permissions'
@@ -59,7 +59,7 @@ export const SECONDARY_NAV: NavItem[] = [
   { href: '/reports', label: 'Reports', icon: ChartColumn, visible: canViewTeamDashboard },
   { href: '/archive', label: 'Archive', icon: Archive, visible: isManagerOrAbove },
   { href: '/import', label: 'Import', icon: Upload, visible: canImportCsv },
-  { href: '/settings', label: 'Settings', icon: Settings, visible: canEditSettings },
+  { href: '/settings', label: 'Settings', icon: Settings, visible: canOpenSettings },
 ]
 
 export function visibleFor(items: NavItem[], user: SessionUser): NavItem[] {

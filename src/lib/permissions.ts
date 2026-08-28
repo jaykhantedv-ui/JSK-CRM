@@ -134,8 +134,16 @@ export function canArchive(user: CurrentUser | null): boolean {
   return isManagerOrAbove(user)
 }
 
+/**
+ * Export is a report with a download button (ADR-042).
+ *
+ * Whoever may open a management screen may take away what it shows: the CSV is
+ * built from the same RLS-bounded queries, so it can carry nothing the screen
+ * does not. Tying it to `canViewTeamDashboard` rather than restating the roles is
+ * what keeps the two from drifting.
+ */
 export function canExportCsv(user: CurrentUser | null): boolean {
-  return isManagerOrAbove(user)
+  return canViewTeamDashboard(user)
 }
 
 export function canImportCsv(user: CurrentUser | null): boolean {
@@ -146,8 +154,21 @@ export function canManageUsers(user: CurrentUser | null): boolean {
   return isOwnerOrAdmin(user)
 }
 
+/**
+ * The global business rules — the §24 thresholds, the taluk list, the stage
+ * probabilities, the SLA. **OWNER only (ADR-042).**
+ *
+ * Changing one changes how the CRM behaves for everybody, without a deploy. That
+ * is configuring the system rather than running the business, and the audit
+ * found an administrator could do it with a single PostgREST call. The control is
+ * `system_settings_update`, which is now `is_owner()`; this only decides what the
+ * screen offers.
+ *
+ * Administering PEOPLE and BRANCHES is a different question — see
+ * `canManageOrganization`, which is still OWNER and ADMIN.
+ */
 export function canEditSettings(user: CurrentUser | null): boolean {
-  return isOwnerOrAdmin(user)
+  return isOwner(user)
 }
 
 /**
@@ -162,9 +183,37 @@ export function canViewTeamDashboard(user: CurrentUser | null): boolean {
   return isManagerOrAbove(user) || readsAllRecords(user)
 }
 
-/** The organisation screens: branches, people and the reporting structure. */
+/**
+ * The organisation screens: branches, people and the reporting structure.
+ *
+ * OWNER and ADMIN. Running the business needs somebody to add a salesperson and
+ * put them under a sales head; it does not need them to move the high-value
+ * threshold (ADR-042).
+ */
 export function canManageOrganization(user: CurrentUser | null): boolean {
   return isOwnerOrAdmin(user)
+}
+
+/**
+ * May this person reach `/settings` at all?
+ *
+ * The index carries both the organisation links (OWNER and ADMIN) and the
+ * business rules (OWNER only), so the page is reachable by both and shows each
+ * of them what is theirs.
+ */
+export function canOpenSettings(user: CurrentUser | null): boolean {
+  return canManageOrganization(user) || canEditSettings(user)
+}
+
+/**
+ * May this person create, alter or deactivate an OWNER?
+ *
+ * Only an owner. Mirrors `guard_owner_role()` in migration 032, which is the
+ * control — an administrator with a JWT and a PostgREST call could mint a second
+ * owner and deactivate the real one until ADR-042.
+ */
+export function canAdministerOwner(user: CurrentUser | null): boolean {
+  return isOwner(user)
 }
 
 /** Where a role lands after signing in (§12.2, decision M-01, ADR-040). */

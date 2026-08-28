@@ -436,6 +436,32 @@ This deployment already has an active OWNER: owner@example.com
 Full procedure and exit codes: `/docs/DEPLOYMENT.md` §10.6. Design and the reason
 this is a script rather than a first-run web page: ADR-039.
 
+### The administrator gets an error on Dashboard, Team or Reports
+
+Fixed in ADR-042. The route admitted the administrator and the service still
+refused it, so the page rendered a Server Components error rather than a refusal.
+If it comes back, the server is running a checkout older than ADR-042:
+
+```bash
+cd /opt/jsk-crm && git log --oneline -1
+```
+
+### What the administrator may and may not do
+
+**ADMIN runs the business. OWNER runs the business and controls the system.**
+
+| The administrator CAN | The administrator CANNOT |
+|---|---|
+| Read every customer, opportunity, project, contact and activity | Create or edit a business record — archiving and reassigning stay with the sales heads |
+| Dashboard, Team, Reports and Export | Change any §24 business rule: the high-value threshold, taluks, stage probabilities, dormancy, SLA |
+| Import | Roll back an import, or set the company target |
+| Add, edit, deactivate and restore people; open and close branches; set the reporting line | Create, rename, demote or deactivate the OWNER |
+
+Both of the last two were open until ADR-042 and were closed in migration 032 —
+an administrator could rewrite every threshold, and could appoint themselves a
+second owner and deactivate the real one, in two SQL statements. Neither needed
+the interface. If somebody asks for one of those, it is the owner's to do.
+
 ### Correcting or removing somebody
 
 ```

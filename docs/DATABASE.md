@@ -418,6 +418,24 @@ remain the backstop.
 ungranted, and a blanket grant silently re-exposes every one of them —
 `tests/integration/service-contracts.test.ts` asserts exactly that and caught it here.
 
+**The authorization audit adds one more:**
+
+```
+032_owner_configures_admin_operates
+                                system_settings insert/update -> is_owner()
+                                guard_owner_role(): only an OWNER may create,
+                                  alter or deactivate an OWNER
+                                triggers renamed users_guard_1_owner_privilege and
+                                  users_guard_2_hierarchy_shape — BEFORE triggers
+                                  fire in NAME order, and the privilege refusal
+                                  has to be the one that answers        [ADR-042]
+```
+
+Both changes close defects that were reproduced as SQL, as ADMIN, before being
+fixed: every §24 threshold was writable by an administrator, and an administrator
+could appoint a second owner and deactivate the real one in two statements.
+Neither was reachable through the interface, and both were reachable with a JWT.
+
 `accounts` and `contacts` are mutually referential; **006 → 007 → 008 breaks the cycle. Do not
 attempt a single migration for both** (§5.12, §25).
 

@@ -2,11 +2,11 @@ import { z } from 'zod'
 
 import { AppError, forbidden, fromPostgrestError } from '@/lib/errors'
 import { targetProgress, type TargetProgress } from '@/lib/metrics'
-import { isManagerOrAbove, isOwner } from '@/lib/permissions'
+import { isOwner } from '@/lib/permissions'
 import { monthsInPeriod, type Period } from '@/lib/period'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { uuidSchema } from '@/lib/validation'
-import { requireUser } from '@/services/auth.service'
+import { requireManagementAccess, requireUser } from '@/services/auth.service'
 import type { SessionUser } from '@/types/domain'
 
 /**
@@ -74,12 +74,21 @@ function toTarget(row: {
   }
 }
 
+/**
+ * The management surfaces — dashboard, team, reports, targets, export.
+ *
+ * **One helper, four services (ADR-042).** Each of these files used to write its
+ * own `isManagerOrAbove()` check, and when ADR-040 admitted ADMIN to management
+ * reporting the routes and the database were widened and these four were not.
+ * The result was the worst possible shape: the route said yes, the service threw,
+ * and an administrator got a Server Components error on Dashboard, Team, Reports
+ * and every report beneath them.
+ *
+ * `requireManagementAccess()` mirrors `assert_management_access()` in the
+ * database, which is the control.
+ */
 async function assertManagement(): Promise<SessionUser> {
-  const user = await requireUser()
-  if (!isManagerOrAbove(user)) {
-    throw forbidden('Targets are a management figure. Ask your manager.')
-  }
-  return user
+  return requireManagementAccess()
 }
 
 /**

@@ -1,11 +1,10 @@
-import { forbidden, fromPostgrestError, notFound } from '@/lib/errors'
+import { fromPostgrestError, notFound } from '@/lib/errors'
 import { quoteToOrderConversion, winRate } from '@/lib/metrics'
 import { DESKTOP_PAGE_SIZE, type PageParams } from '@/lib/pagination'
-import { isManagerOrAbove } from '@/lib/permissions'
 import type { Period } from '@/lib/period'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { uuidSchema } from '@/lib/validation'
-import { requireUser } from '@/services/auth.service'
+import { requireManagementAccess } from '@/services/auth.service'
 import {
   getExceptionCounts,
   getPeriodSummary,
@@ -34,12 +33,21 @@ import type { OpportunityFlagsRow, SessionUser } from '@/types/domain'
  * an owner sees everyone. Nothing in this file widens that.
  */
 
+/**
+ * The management surfaces — dashboard, team, reports, targets, export.
+ *
+ * **One helper, four services (ADR-042).** Each of these files used to write its
+ * own `isManagerOrAbove()` check, and when ADR-040 admitted ADMIN to management
+ * reporting the routes and the database were widened and these four were not.
+ * The result was the worst possible shape: the route said yes, the service threw,
+ * and an administrator got a Server Components error on Dashboard, Team, Reports
+ * and every report beneath them.
+ *
+ * `requireManagementAccess()` mirrors `assert_management_access()` in the
+ * database, which is the control.
+ */
 async function assertManagement(): Promise<SessionUser> {
-  const user = await requireUser()
-  if (!isManagerOrAbove(user)) {
-    throw forbidden('The team view is available to managers and the owner only.')
-  }
-  return user
+  return requireManagementAccess()
 }
 
 export type TeamOverview = {
