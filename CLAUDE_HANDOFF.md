@@ -1,10 +1,14 @@
 # JSK CRM — Handoff
 
-**Written 2026-08-23, against commit `2a0d35bb60761852e8dc9fd2e33d6681bc97c30c`.**
+**Written 2026-08-23, against commit `2a0d35bb60761852e8dc9fd2e33d6681bc97c30c`,
+which is also what production runs.**
 
-You are taking over a CRM that is **live and in daily use by real employees**. Read
-this file and `PROJECT_STATE.md` before running anything. Then read `CLAUDE.md` —
-it is the engineering contract for this repository and it is not advisory.
+You are taking over a CRM that is **live and in daily use by real employees**, and
+you are intended to be **the sole development and maintenance AI for this
+repository** — nobody else is working on it in parallel, and nobody else is
+checking the security model. Read this file and `PROJECT_STATE.md` before running
+anything. Then read `CLAUDE.md` — it is the engineering contract for this
+repository and it is not advisory.
 
 Two things to internalise before you touch anything:
 
@@ -35,8 +39,8 @@ rather than analytics, and the dashboard is exception → explanation → action
 | **GitHub** | `jaykhantedv-ui/JSK-CRM` |
 | **Branch** | `claude/jsk-crm-final-completion-mr2e17` |
 | **Server path** | `/opt/jsk-crm` |
-| **Repo HEAD** | `2a0d35b` (2026-08-23) |
-| **Production commit** | **Read it from the server — see §17.** It is NOT `2a0d35b`. |
+| **Production commit** | **`2a0d35b`** — deployed, migration `032` applied |
+| **Repo HEAD** | ahead of production by documentation-only commits |
 
 ### The source of truth
 
@@ -331,10 +335,17 @@ and `manager_id` had to be (ADR-040).
 | Branch | State |
 |---|---|
 | **Moolakarai Branch** | **ACTIVE.** Everyone in the pilot is assigned here. |
-| **Chithode Branch** | **Intentionally not configured yet.** Created-and-closed, or not created at all — check the live system. Nobody is assigned to it and it must not appear in a salesperson's selector. |
+| **Chithode Branch** | **Not configured.** No outlet row exists — it has not been created, not merely closed. Nobody is assigned to it and it appears in no selector. |
 
-A **closed** branch appears only on Settings → Organization → Branches, where it
-is administered. `listAuthorizedOutlets()` — the single branch-selector helper —
+Production has **one outlet**, Moolakarai, confirmed by the verified backup taken
+during the `2a0d35b` deployment. Production has **15 rows in `public.users`** —
+consistent with the fourteen people above plus the ADR-003 system actor, though
+the composition is an inference from the count rather than something the
+deployment report stated. Confirm on Settings → Organization → People.
+
+When Chithode is eventually opened it is created at Settings → Organization →
+Branches. A **closed** branch appears only on that screen, where it is
+administered: `listAuthorizedOutlets()` — the single branch-selector helper —
 offers active branches only.
 
 ---
@@ -472,7 +483,7 @@ Removing deactivates. Fixed along the way: `updateUser`'s self-edit guards
 compared submitted values against nothing, so an owner correcting their own name
 was refused — an edit form posts every field it renders.
 
-**ADMIN access and the security fixes (ADR-042, `2a0d35b`).** ADR-040 widened
+**ADMIN access and the security fixes (ADR-042, `2a0d35b` — DEPLOYED).** ADR-040 widened
 ADMIN in the database and the route guards and left four **service**-layer gates
 on `isManagerOrAbove()`. The route said yes, the service threw, and Dashboard,
 Team and Reports rendered a Server Components error. All four now defer to
@@ -489,9 +500,16 @@ update public.users set role='OWNER', manager_id=null where id=<any>;  -- SUCCEE
 update public.users set is_active=false where role='OWNER';            -- SUCCEEDED
 ```
 
-Both closed by migration 032. Nothing had stopped the demotion except
-coincidence: the fixture owner had a direct report, so the hierarchy guard fired
-first — clearing `manager_id` in the same statement went straight through.
+Both closed by migration `032`, **which is applied to production**. Nothing had
+stopped the demotion except coincidence: the fixture owner had a direct report, so
+the hierarchy guard fired first — clearing `manager_id` in the same statement went
+straight through.
+
+The deployment itself, as the operator reported it: a verified backup taken
+immediately beforehand with its restore verification succeeding, `git pull` from
+`2745e4f` to `2a0d35b`, migration `032` applied successfully, the application
+image rebuilt, the app eventually healthy (see §14), and the production smoke
+test passing 32 / 32 against https://www.jskcrm.online.
 
 **Verified encrypted backups (ADR-037, ADR-038).** Several rounds: the dump was
 taken by a role that RLS blocked; the archive was truncated by an exec pipe; the
@@ -506,7 +524,8 @@ the local stack; the guard moved to `deploy/start.sh --tunnel`.
 ## 14. Known limitations and unresolved issues
 
 **`deploy/start.sh` can print `UNHEALTHY` while the app is still starting — this
-issue is CURRENT.** `start.sh` brings up `gateway` and `app` with `up -d` and
+issue is CURRENT, and was seen on the `2a0d35b` deployment,** whose report records
+the application becoming healthy *eventually* rather than at once. `start.sh` brings up `gateway` and `app` with `up -d` and
 **no `--wait`** (unlike the `db`/`auth`/`storage` steps, which do use it), then
 immediately runs `deploy/health.sh`. The app container's `HEALTHCHECK` has a 20 s
 `start-period`, so `docker compose ps` shows `health: starting` while `health.sh`
@@ -514,9 +533,10 @@ has already failed its `curl` to `/api/health` and printed
 `FAIL application is not answering on port 3000` → `UNHEALTHY`.
 
 > **It is a race, not a fault.** Wait ten seconds and run `deploy/health.sh`
-> again; it returns `HEALTHY`. Do not roll back on this alone — confirm with a
-> second run and with `docker compose ps` first. The one-line fix, when somebody
-> wants it, is `--wait` on the `gateway app` line of `deploy/start.sh`.
+> again; it returns `HEALTHY`, which is what happened on the `2a0d35b`
+> deployment. Do not roll back on this alone — confirm with a second run and with
+> `docker compose ps` first. The one-line fix, when somebody wants it, is
+> `--wait` on the `gateway app` line of `deploy/start.sh`.
 
 Other current limitations:
 
@@ -643,30 +663,76 @@ closed.
 
 ### Reading the production commit — do this first, every session
 
+Production runs `2a0d35b` with migrations `001`–`032` applied. **Do not assume
+the repository HEAD is what is deployed** — documentation and unmerged work move
+ahead of it. Confirm before you reason about production:
+
 ```bash
 ssh <server> 'cd /opt/jsk-crm && git rev-parse --short HEAD && git log --oneline -1'
 ssh <server> 'cd /opt/jsk-crm && deploy/migrate.sh --status'
 ```
 
-**Do not assume the repository HEAD is what is deployed.** See `PROJECT_STATE.md`.
+Then update `PROJECT_STATE.md` if what you find differs from what it says. That
+file is only worth anything if the next person can trust it.
 
 ---
 
 ## 18. Current next priorities
 
-1. **Deploy `2a0d35b`** — ADR-042. It carries migration `032`, which closes a
-   privilege escalation an ADMIN can currently perform on the live system. Follow
-   §15 exactly, backup first. Until then, the ADMIN cannot open Dashboard, Team
-   or Reports, **and can mint a second OWNER**.
-2. **Create the remaining team members** through Settings → Organization → People,
-   in ladder order — administrator, then sales heads, then salespeople — because
-   `guard_user_hierarchy()` checks the manager's role and refuses a person whose
-   manager does not exist yet.
-3. **Verify the Reporting Structure screen** matches §7 exactly. It is the
-   authorization model drawn; a person in the wrong place sees the wrong
-   pipeline.
-4. **Settle SPEC_AUDIT B-14 and B-15** with the business owner.
-5. **Confirm the backup timers are installed and firing** —
-   `systemctl list-timers 'jsk-crm*'` — and that a `.dump.enc` from last night
-   exists. A backup nobody has restored is a guess.
-6. **Decide whether ADMIN should archive and reassign** (§14).
+`2a0d35b` is deployed and migration `032` is applied, so nothing outstanding puts
+the live system at risk. What remains is confirmation and two open questions.
+
+1. **Confirm the organisation on screen.** Settings → Organization → Reporting
+   Structure should match §7 exactly — it is the authorization model drawn, and a
+   person in the wrong place is a person seeing the wrong pipeline. Then
+   spot-check as Vinay (ADMIN): Dashboard, Team and Reports load, and `/settings`
+   shows the Organization links but **not** the business-rules card.
+2. **Confirm the backup timers are firing** — `systemctl list-timers 'jsk-crm*'`
+   — and that a `.dump.enc` from last night exists. The backup taken during the
+   `2a0d35b` deployment was verified, so the mechanism is known good; what is
+   unconfirmed is that the nightly schedule is installed and running.
+3. **Settle SPEC_AUDIT B-14 and B-15** with the business owner — `/my-day` versus
+   `/today`, and the self-contradicting bullet in the reporting-shape rules.
+4. **Decide whether ADMIN should archive and reassign** (§14). One predicate.
+5. **Optional, low risk:** add `--wait` to the `gateway app` line of
+   `deploy/start.sh` so a deployment stops reporting `UNHEALTHY` before the
+   application has finished starting (§14).
+6. **Chithode Branch** when the business is ready to work it: create it at
+   Settings → Organization → Branches, assign people to it, and it starts
+   appearing in their selectors. Nothing in the code needs changing for a second
+   branch — that is what ADR-016 bought.
+
+---
+
+## 19. You are the only one working on this
+
+**The Claude Code account reading this is intended to be the sole development and
+maintenance AI for this repository.** No other assistant is expected to be
+working on it in parallel, which changes what you can take for granted.
+
+- **Nobody else is checking the security model.** Row-level security is the
+  boundary. Every change to it ships with an integration test written **as the
+  restricted role** — verifying a permission as OWNER proves nothing, because
+  OWNER passes everything. The audit suite is
+  `tests/integration/authorization-audit.test.ts`; extend it rather than trusting
+  a screen.
+- **Nobody else is keeping the documentation true.** `/docs/DECISIONS.md` records
+  every architectural decision with its reasoning and the alternatives rejected.
+  `/docs/SPEC_AUDIT.md` records every place the specification is silent,
+  ambiguous or self-contradictory. **An assumption that is not written down is a
+  defect** (CLAUDE.md §2) — implement the mechanism, leave the value
+  configurable, and record the question.
+- **Keep this file and `PROJECT_STATE.md` current**, especially the deployed
+  commit and the applied migration. They describe a production system that
+  fourteen people depend on.
+- **Follow CLAUDE.md §19's working method every phase**: inspect the repository,
+  state what will be implemented and which §23 acceptance criteria are targeted,
+  write and apply the migration, implement the service with Zod schemas,
+  implement the UI, write and verify RLS for every table touched **in the same
+  phase as the table**, write unit and integration tests, run the full suite and
+  fix every failure, update `/docs/*`, then summarise changes, deviations and open
+  TODOs — and stop for review.
+- **Never skip, `.skip` or delete a failing test to make a phase pass.**
+- When something in the specification and something in the code disagree, the
+  specification wins and the code is fixed — or the deviation is recorded in
+  `/docs/DECISIONS.md` with a reason. `CLAUDE_CODE_BUILD_SPEC.md` is never edited.

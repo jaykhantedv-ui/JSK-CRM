@@ -1,11 +1,18 @@
 # JSK CRM — Project State
 
-**Snapshot: 2026-08-23.** Operational facts only. Background, architecture and
-reasoning are in `CLAUDE_HANDOFF.md`.
+**Snapshot: 2026-08-23, updated after the `2a0d35b` production deployment.**
+Operational facts only. Background, architecture and reasoning are in
+`CLAUDE_HANDOFF.md`.
 
-> Anything below marked **VERIFY ON SERVER** could not be observed from the
-> development environment. Run the command given and replace the value. Do not
-> carry a guess forward.
+> **Where the deployment facts come from.** The `2a0d35b` deployment was run by
+> the operator on the server and its outcome was reported to the assistant that
+> wrote this file; the run's console output is not in this repository. Everything
+> in the "Deployment of `2a0d35b`" table below is that report, recorded as
+> given and not embellished — no timestamps, byte counts or log lines have been
+> invented around it.
+>
+> Anything still marked **VERIFY ON SERVER** was not covered by that report. Run
+> the command given and replace the value. Do not carry a guess forward.
 
 ---
 
@@ -13,6 +20,9 @@ reasoning are in `CLAUDE_HANDOFF.md`.
 
 **Live and in daily use by employees.** Do not restart, redeploy or migrate
 without a reason and a backup.
+
+**Production is current.** It runs `2a0d35b` — the last commit that changes
+behaviour. Everything after it on this branch is documentation only.
 
 | | |
 |---|---|
@@ -27,33 +37,38 @@ without a reason and a backup.
 
 | | |
 |---|---|
-| **Repository HEAD** | `2a0d35bb60761852e8dc9fd2e33d6681bc97c30c` (`2a0d35b`) |
-| **Deployed on production** | **VERIFY ON SERVER — it is NOT `2a0d35b`.** |
+| **Deployed on production** | **`2a0d35b`** — `fix: the administrator runs the business, the owner controls the system` |
+| Repository HEAD | ahead of production by **documentation-only** commits (`9f86f01` and later) |
+
+Production is functionally current: `2a0d35b` is the newest commit that changes
+application behaviour or schema. Confirm at any time with:
 
 ```bash
 ssh <server> 'cd /opt/jsk-crm && git rev-parse --short HEAD && git log --oneline -1'
 ```
 
-**What is known without the server:**
+### Deployment of `2a0d35b` — as reported by the operator
 
-- `2a0d35b` (ADR-042, migration 032) has **not** been deployed. It was committed
-  and pushed with an explicit instruction not to deploy.
-- Production is somewhere in `c541cd0 … 2745e4f`. `c541cd0` is deployed or later:
-  the People screen was reported working after that fix. Whether `2745e4f`
-  (People Edit/Remove) is deployed was never confirmed.
-- **Migration `032` is NOT applied to production.** `031` is — the organisation
-  screens are live.
+| Step | Outcome |
+|---|---|
+| Verified backup, taken immediately **before** the migration | **succeeded** |
+| Restore verification of that backup | **succeeded** |
+| `git pull` — `2745e4f` → `2a0d35b` | **succeeded** |
+| `deploy/migrate.sh` — migration `032` | **applied successfully** |
+| Application image rebuild | **succeeded** |
+| `deploy/health.sh` | **eventually HEALTHY** — see Known Issue 1 |
+| `scripts/smoke.sh https://www.jskcrm.online` | **32 / 32 passed** |
 
 Recent history, newest first:
 
 ```
-2a0d35b  fix: the administrator runs the business, the owner controls the system   NOT DEPLOYED
-2745e4f  feat: edit and remove people in Settings → Organization                    unconfirmed
-c541cd0  fix: assemble the organization without PostgREST self-embedding            deployed
-7bf50fd  feat: model the organization on the reporting line                         deployed
-4f8374f  feat: bootstrap the first production owner                                 deployed
-a2116c0  fix: finish container backup validation path                               deployed
-02de62e  fix: validate backups inside postgres container                            deployed
+9f86f01  docs: add the project handoff and current state                            docs only
+2a0d35b  fix: the administrator runs the business, the owner controls the system   ► DEPLOYED
+2745e4f  feat: edit and remove people in Settings → Organization                     deployed
+c541cd0  fix: assemble the organization without PostgREST self-embedding             deployed
+7bf50fd  feat: model the organization on the reporting line                          deployed
+4f8374f  feat: bootstrap the first production owner                                  deployed
+a2116c0  fix: finish container backup validation path                                deployed
 ```
 
 ---
@@ -80,7 +95,7 @@ at Cloudflare's edge; nothing is exposed inbound on the VPS.
 | Volume | `db-data` (Docker named volume) |
 | Reachable | `127.0.0.1:54322` on the host only |
 | Migrations in repo | `001` … `032` |
-| **Applied in production** | `001` … `031`. **`032` is PENDING.** **VERIFY ON SERVER.** |
+| **Applied in production** | **`001` … `032`, all applied.** `032` applied successfully during the `2a0d35b` deployment |
 | Tables in `public` | 14 |
 | DELETE policies | exactly **1**, on `project_stakeholders` (ADR-004) |
 | Admin role | `supabase_admin` — `postgres` is an ordinary role in this image |
@@ -89,21 +104,27 @@ at Cloudflare's edge; nothing is exposed inbound on the VPS.
 ssh <server> 'cd /opt/jsk-crm && deploy/migrate.sh --status'
 ```
 
-**Migration `032` closes a live privilege escalation.** Until it is applied, an
-ADMIN can rewrite every `system_settings` business rule, mint a second OWNER, and
-deactivate the real OWNER — with a JWT and a PostgREST call, no interface needed.
+**Migration `032` is applied, so the ADMIN privilege escalation is closed.** An
+administrator can no longer rewrite the `system_settings` business rules, mint a
+second OWNER, or deactivate the real OWNER. Those three were reachable on the
+live system before this migration, with a JWT and a PostgREST call and no
+interface involved.
 
 ---
 
 ## OUTLET STATE
 
+**One outlet exists in production** — confirmed by the verified backup taken
+during the `2a0d35b` deployment.
+
 | Branch | State |
 |---|---|
-| **Moolakarai Branch** | **ACTIVE** — the whole pilot is assigned here |
-| **Chithode Branch** | **Intentionally not configured.** Nobody assigned. Must not appear in a salesperson's branch selector. **VERIFY ON SERVER** whether the row exists-and-is-closed or does not exist yet |
+| **Moolakarai Branch** | **ACTIVE** — the configured pilot outlet. The whole pilot is assigned here |
+| **Chithode Branch** | **Not configured.** No row exists — it has not been created, not merely closed. Nobody is assigned to it and it appears in no selector |
 
 Outlets are data — created at **Settings → Organization → Branches**, never
-seeded, never hard-coded.
+seeded, never hard-coded. When Chithode is eventually opened it is created there,
+and `listAuthorizedOutlets()` starts offering it to whoever is assigned to it.
 
 ---
 
@@ -129,8 +150,22 @@ Sales heads report to the **ADMIN**, never directly to the OWNER.
 
 ### Who actually exists
 
-**Jay Khanted (OWNER) and Vinay Kumar Jain (ADMIN) exist in production.** The rest
-of the roster is **VERIFY ON SERVER** — open Settings → Organization → People, or:
+**15 rows in `public.users`** — confirmed by the verified backup taken during the
+`2a0d35b` deployment.
+
+That count is consistent with the target organisation being complete: fourteen
+real people plus the **ADR-003 system actor** (`system@jsk-crm.internal`, an
+inactive `ADMIN` that is never a person, never appears in a list, and can never
+sign in). **Fourteen real accounts is an inference from the count, not something
+the deployment report stated** — confirm the roster and the reporting line on the
+screen before relying on it:
+
+```
+Settings → Organization → People
+Settings → Organization → Reporting Structure
+```
+
+or read it directly:
 
 ```bash
 ssh <server> 'cd /opt/jsk-crm && docker compose --env-file deploy/env/production.env \
@@ -139,6 +174,10 @@ ssh <server> 'cd /opt/jsk-crm && docker compose --env-file deploy/env/production
      from public.users u left join public.users m on m.id = u.manager_id
     order by u.role, u.full_name;"'
 ```
+
+Jay Khanted (OWNER) and Vinay Kumar Jain (ADMIN) are known to exist — Vinay's
+inability to open Dashboard, Team and Reports is what prompted the ADR-042 work
+that `2a0d35b` delivered.
 
 People are created **in ladder order** — administrator, then sales heads, then
 salespeople — because `guard_user_hierarchy()` checks the manager's role and
@@ -190,7 +229,12 @@ refuses somebody whose manager does not exist yet.
 | Verified | Yes — `--verify` restores into a scratch database and checks 14 tables, 42 policies, FKs, indexes, row counts, extensions, `search_crm()` and **zero** pg_restore diagnostics |
 | Passphrase | `BACKUP_PASSPHRASE` in `deploy/env/production.env` **and the business safe. Lose it and every backup is unreadable.** |
 
-**VERIFY ON SERVER** — timers installed and a recent artifact present:
+**A verified backup was taken immediately before migration `032`, and its restore
+verification succeeded** — the operator's deployment report. That is the most
+recent restore proof on record for this system.
+
+**VERIFY ON SERVER** — timers installed and firing, and a recent artifact
+present:
 
 ```bash
 ssh <server> "systemctl list-timers 'jsk-crm*' && ls -lt /var/backups/jsk-crm/ | head"
@@ -220,79 +264,108 @@ ssh <server> 'cd /opt/jsk-crm && docker compose --env-file deploy/env/production
 | `4f8374f` | Owner bootstrap — the deployment could not be signed into before it | ✔ |
 | `7bf50fd` | Organisation on the reporting line; `manager_id`; migration 031 | ✔ |
 | `c541cd0` | PostgREST self-reference workaround — both org screens were dead | ✔ |
-| `2745e4f` | People Edit / Remove (deactivate) / Restore | unconfirmed |
-| `2a0d35b` | ADMIN access fix + migration 032 owner/admin boundary | **✘ not deployed** |
+| `2745e4f` | People Edit / Remove (deactivate) / Restore | ✔ |
+| `2a0d35b` | ADMIN access fix + migration 032 owner/admin boundary | ✔ **current** |
 
 ---
 
 ## KNOWN ISSUES
 
-**1. ADMIN cannot open Dashboard, Team or Reports (fixed in `2a0d35b`, not
-deployed).** Route guard admits ADMIN, four service gates still refused it →
-generic Server Components error.
+**1. `deploy/start.sh` can report `UNHEALTHY` while the app is still starting.**
+CURRENT, and seen on the `2a0d35b` deployment — the operator's report records the
+application becoming healthy *eventually* rather than at once.
 
-**2. ADMIN privilege escalation is LIVE until `032` is applied.** An ADMIN can
-change every global business rule, mint a second OWNER, and deactivate the real
-OWNER. Reproduced as plain SQL; no interface needed. **This is the reason to
-deploy.**
+`start.sh` brings up `gateway app` with `up -d` and **no `--wait`** (unlike the
+`db`/`auth`/`storage` steps, which use it), then runs `deploy/health.sh`
+immediately. The app container's `HEALTHCHECK` has a 20 s `start-period`, so
+`docker compose ps` shows `health: starting` while `health.sh` has already failed
+its curl to `/api/health` and printed `UNHEALTHY`.
 
-**3. `deploy/start.sh` can report `UNHEALTHY` while the app is still starting.**
-CURRENT. `start.sh` brings up `gateway app` with `up -d` and **no `--wait`**, then
-runs `deploy/health.sh` immediately. The app's `HEALTHCHECK` has a 20 s
-`start-period`, so `docker compose ps` shows `health: starting` while `health.sh`
-has already failed its curl and printed `UNHEALTHY`.
+> **A race, not a fault.** Wait ~10 s and run `deploy/health.sh` again — it
+> returns `HEALTHY`, which is what happened here. Do not roll back on the first
+> reading. One-line fix when somebody wants it: add `--wait` to the
+> `gateway app` line of `deploy/start.sh`.
 
-> **A race, not a fault.** Wait ~10 s, run `deploy/health.sh` again — it returns
-> `HEALTHY`. Do not roll back on the first reading. One-line fix when wanted:
-> add `--wait` to the `gateway app` line of `deploy/start.sh`.
-
-**4. ADMIN writes no business data.** Deliberate (ADR-042): it reads everything
+**2. ADMIN writes no business data.** Deliberate (ADR-042): it reads everything
 and administers people and branches, but archiving and reassigning stay with the
-sales heads. Open for the business to decide; one predicate to change.
+sales heads. Open for the business to decide; one predicate to change. **Raise it;
+do not widen it quietly.**
 
-**5. SPEC_AUDIT B-14 / B-15 open.** `/my-day` vs `/today` (two screens or one?),
+**3. SPEC_AUDIT B-14 / B-15 open.** `/my-day` vs `/today` (two screens or one?),
 and a self-contradicting bullet in the reporting-shape rules. Both implemented
 under a stated reading, both awaiting the business owner.
 
-**6. No staging environment.** One machine, live users.
+**4. No staging environment.** One machine, live users.
 
-**7. Playwright E2E is skipped** unless `E2E_SUPABASE_READY=1` with real
+**5. Playwright E2E is skipped** unless `E2E_SUPABASE_READY=1` with real
 credentials — GoTrue cannot run in the development environment (ADR-018). The
 authorization rules are proved in the integration suite instead.
+
+### Closed by the `2a0d35b` deployment
+
+- **ADMIN could not open Dashboard, Team or Reports** — the route guard admitted
+  ADMIN while four service gates still refused it. Fixed.
+- **ADMIN privilege escalation** — an administrator could rewrite every global
+  business rule, mint a second OWNER and deactivate the real one. Closed by
+  migration `032`, which is applied.
 
 ---
 
 ## CURRENT BUSINESS PILOT
 
-**Moolakarai Branch only.** All fourteen people — owner, administrator, three
-sales heads, nine salespeople — work out of that one branch, which is exactly why
-outlet scope could not be the read rule and the reporting line had to be
-(ADR-040).
+**Moolakarai Branch only** — it is the one configured outlet, and every person in
+the pilot is assigned to it. That single fact is why outlet scope could not be the
+read rule and the reporting line had to be (ADR-040): three sales heads sharing
+one branch would otherwise each see the other two's entire pipeline.
 
-**Chithode Branch is intentionally not configured.** Not staffed, not assigned,
-and not offered in any salesperson's selector.
+**Chithode Branch has not been configured for the pilot.** No outlet row exists
+for it.
 
 ---
 
 ## IMMEDIATE NEXT TASK
 
-**Deploy `2a0d35b`.** It closes the live privilege escalation in issue 2 and fixes
-the ADMIN pages in issue 1. It carries migration `032`, so back up first.
+`2a0d35b` is deployed and migration `032` is applied, so nothing is outstanding
+that puts the live system at risk. What is left is confirmation and two open
+questions.
 
-```bash
-cd /opt/jsk-crm
-deploy/backup.sh --verify          # backup AND prove it restores — do not skip
-git pull
-deploy/migrate.sh --status         # expect 032 pending, 001–031 applied
-deploy/migrate.sh                  # applies 032 only, in one transaction
-deploy/start.sh --build            # add --tunnel if the tunnel is not running
-deploy/health.sh                   # UNHEALTHY on the first read? see issue 3
-deploy/db-credentials.sh --test
-scripts/smoke.sh https://www.jskcrm.online
-```
+1. **Confirm the organisation on screen.** Settings → Organization → Reporting
+   Structure should match the tree above exactly. It is the authorization model
+   drawn — a person in the wrong place is a person seeing the wrong pipeline.
+   Then spot-check as Vinay (ADMIN): Dashboard, Team and Reports load, and
+   `/settings` shows the Organization links but **not** the business-rules card.
+2. **Confirm the backup timers are firing** — `systemctl list-timers 'jsk-crm*'`
+   — and that a `.dump.enc` from last night exists. A backup nobody has restored
+   is a guess; the one taken during this deployment was verified, so the
+   mechanism is known good.
+3. **Settle SPEC_AUDIT B-14 and B-15** with the business owner.
+4. **Decide whether ADMIN should archive and reassign** (Known Issue 2).
+5. **Optional, low risk:** add `--wait` to the `gateway app` line of
+   `deploy/start.sh` so a deployment stops reporting `UNHEALTHY` before the app
+   has finished starting (Known Issue 1).
 
-Then sign in as Vinay (ADMIN) and confirm: Dashboard, Team and Reports load;
-`/settings` shows the Organization links but **not** the business-rules card.
+---
 
-Afterwards: create the remaining team members in ladder order, and check
-Settings → Organization → Reporting Structure against the tree above.
+## OWNERSHIP OF THIS REPOSITORY
+
+**The Claude Code account reading this is intended to become the sole
+development and maintenance AI for this repository.** No other assistant is
+expected to be working on it in parallel.
+
+That means the responsibilities below are yours and are not shared:
+
+- **`CLAUDE.md` is the engineering contract**, not advice. Read it before writing
+  code, and follow §19's working method — inspect, state what will change, write
+  the migration, implement the service, implement the UI, write the RLS policy in
+  the same phase as the table, write the tests, run the full suite, update
+  `/docs/*`, summarise deviations.
+- **Keep the documentation true.** `/docs/DECISIONS.md` records every
+  architectural decision with its reasoning and the alternatives rejected;
+  `/docs/SPEC_AUDIT.md` records every place the specification is silent or
+  self-contradictory. An assumption that is not written down is a defect.
+- **Keep this file and `CLAUDE_HANDOFF.md` current.** They are the state of a
+  production system, and they are only worth anything if the next person can
+  trust them. Update them when production changes — especially the deployed
+  commit and the applied migration.
+- **Nobody else is checking the security model.** RLS is the boundary; every
+  change to it ships with an integration test written as the restricted role.
